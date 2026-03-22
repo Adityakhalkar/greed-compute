@@ -42,18 +42,29 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let info = state.sessions.create_session(body.ttl_seconds);
-    tracing::info!(session_id = %info.session_id, "Session created");
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "session_id": info.session_id,
-            "created_at": info.created_at,
-            "expires_at": info.expires_at,
-            "workspace_path": info.workspace_path,
-        })),
-    )
+    match state.sessions.create_session(body.ttl_seconds).await {
+        Ok(info) => {
+            tracing::info!(session_id = %info.session_id, "Session created");
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "session_id": info.session_id,
+                    "created_at": info.created_at,
+                    "expires_at": info.expires_at,
+                    "workspace_path": info.workspace_path,
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create session");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to create session: {}", e),
+                })),
+            )
+        }
+    }
 }
 
 async fn terminate_session(
@@ -108,16 +119,8 @@ async fn execute_code(
         .get_session(&id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Run Python code in a blocking task (PyO3 is not async)
-    let code = body.code.clone();
-    let runtime = session.runtime.clone();
-
-    let result = tokio::task::spawn_blocking(move || {
-        let mut rt = runtime.blocking_lock();
-        rt.execute(&code)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut runtime = session.runtime.lock().await;
+    let result = runtime.execute(&body.code).await;
 
     Ok(Json(ExecuteResponse {
         stdout: result.stdout,

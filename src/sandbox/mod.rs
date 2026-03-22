@@ -28,16 +28,20 @@ pub struct Session {
 #[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<DashMap<String, Arc<Session>>>,
+    worker_path: String,
+    python_path: String,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
+    pub fn new(worker_path: String, python_path: String) -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
+            worker_path,
+            python_path,
         }
     }
 
-    pub fn create_session(&self, ttl_secs: Option<i64>) -> SessionInfo {
+    pub async fn create_session(&self, ttl_secs: Option<i64>) -> Result<SessionInfo, String> {
         let session_id = Uuid::new_v4().to_string();
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
         let now = Utc::now();
@@ -47,7 +51,11 @@ impl SessionManager {
         let workspace = std::env::temp_dir()
             .join("greed-compute")
             .join(&session_id);
-        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
+
+        let runtime =
+            PythonRuntime::spawn(&workspace, &self.worker_path, &self.python_path).await?;
 
         let info = SessionInfo {
             session_id: session_id.clone(),
@@ -59,12 +67,12 @@ impl SessionManager {
 
         let session = Arc::new(Session {
             info: info.clone(),
-            runtime: Arc::new(Mutex::new(PythonRuntime::new())),
+            runtime: Arc::new(Mutex::new(runtime)),
             workspace,
         });
 
         self.sessions.insert(session_id, session);
-        info
+        Ok(info)
     }
 
     pub fn get_session(&self, session_id: &str) -> Option<Arc<Session>> {

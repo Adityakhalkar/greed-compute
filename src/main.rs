@@ -30,7 +30,29 @@ async fn main() {
     let db = Database::new("greed-compute.db").expect("Failed to initialize database");
     db.migrate().expect("Failed to run database migrations");
 
-    let sessions = SessionManager::new();
+    // Resolve worker path
+    let worker_path = std::env::current_dir()
+        .unwrap()
+        .join("sandbox")
+        .join("worker.py")
+        .to_string_lossy()
+        .to_string();
+
+    // Resolve python path: prefer .venv/bin/python3, fall back to system python3
+    let venv_python = std::env::current_dir()
+        .unwrap()
+        .join(".venv")
+        .join("bin")
+        .join("python3");
+    let python_path = if venv_python.exists() {
+        venv_python.to_string_lossy().to_string()
+    } else {
+        "python3".to_string()
+    };
+
+    tracing::info!(worker_path = %worker_path, python_path = %python_path, "Resolved Python paths");
+
+    let sessions = SessionManager::new(worker_path, python_path);
 
     // Start TTL sweeper — kills expired sessions every 30s
     let sweep_sessions = sessions.clone();
