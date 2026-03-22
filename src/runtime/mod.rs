@@ -39,6 +39,7 @@ impl PythonRuntime {
             .env("GREED_WORKSPACE", workspace.to_string_lossy().as_ref())
             .env("GREED_MAX_MEMORY_MB", "512")
             .env("GREED_MAX_CPU_SECONDS", "30")
+            .env("GREED_PRELOAD", "1")
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("Failed to spawn Python worker: {}", e))?;

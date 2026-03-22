@@ -54,7 +54,10 @@ async fn main() {
 
     let sessions = SessionManager::new(worker_path, python_path);
 
-    // Start TTL sweeper — kills expired sessions every 30s
+    // Pre-fill warm pool at startup
+    sessions.fill_warm_pool().await;
+
+    // Start TTL sweeper — kills expired sessions + refills warm pool
     let sweep_sessions = sessions.clone();
     tokio::spawn(async move {
         sweep_sessions.run_sweeper().await;

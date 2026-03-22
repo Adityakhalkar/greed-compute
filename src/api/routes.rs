@@ -24,10 +24,12 @@ pub fn router() -> Router<Arc<AppState>> {
 // ── Health ──────────────────────────────────────────────
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let pool_size = state.sessions.warm_pool_size().await;
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "active_sessions": state.sessions.active_session_count(),
+        "warm_pool": pool_size,
     }))
 }
 
