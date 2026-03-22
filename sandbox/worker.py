@@ -25,7 +25,53 @@ BLOCKED_MODULES = frozenset({
     "code", "codeop", "compileall", "pkgutil", "zipimport",
 })
 
+# Pre-load ML libraries BEFORE installing the import hook.
+# These libraries internally use blocked modules (ctypes, threading, etc.)
+# which is fine — we only want to block USER code from importing them.
+_preloaded_np = None
+_preloaded_pd = None
+try:
+    import numpy as _preloaded_np
+except ImportError:
+    pass
+try:
+    import pandas as _preloaded_pd
+except ImportError:
+    pass
+try:
+    import sklearn as _preloaded_sklearn
+except ImportError:
+    pass
+try:
+    import matplotlib as _preloaded_mpl
+except ImportError:
+    pass
+try:
+    import scipy as _preloaded_scipy
+except ImportError:
+    pass
+
 _original_import = builtins.__import__
+
+# Neuter dangerous modules that were pulled in as dependencies.
+# They're in sys.modules but we replace them with dummy objects so
+# user code can't call their functions.
+NEUTERED_MODULES = {"subprocess", "shutil", "socket", "multiprocessing"}
+
+class _NeuteredModule:
+    """A dummy module that raises on any attribute access."""
+    def __init__(self, name):
+        self._name = name
+    def __getattr__(self, attr):
+        if attr.startswith("_"):
+            return object.__getattribute__(self, attr)
+        raise PermissionError(
+            f"Module '{self._name}' is disabled in greed-compute sandbox"
+        )
+
+for _mod_name in NEUTERED_MODULES:
+    if _mod_name in sys.modules:
+        sys.modules[_mod_name] = _NeuteredModule(_mod_name)
 
 
 def _restricted_import(name, *args, **kwargs):
@@ -80,16 +126,10 @@ def emit(obj):
 def make_session_globals():
     """Create a fresh session globals dict with numpy/pandas pre-loaded."""
     g = {"__builtins__": builtins}
-    try:
-        import numpy as np
-        g["np"] = np
-    except ImportError:
-        pass
-    try:
-        import pandas as pd
-        g["pd"] = pd
-    except ImportError:
-        pass
+    if _preloaded_np is not None:
+        g["np"] = _preloaded_np
+    if _preloaded_pd is not None:
+        g["pd"] = _preloaded_pd
     return g
 
 
