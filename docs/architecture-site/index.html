@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>greed-compute — System Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0c0c10;
+  --bg1: #121218;
+  --bg2: #1a1a22;
+  --bg3: #22222e;
+  --border: #2a2a38;
+  --border-hi: #3a3a4e;
+  --t1: #f0f0f5;
+  --t2: #b0b0c0;
+  --t3: #707088;
+  --green: #00d88a;
+  --green-bg: rgba(0,216,138,0.08);
+  --green-border: rgba(0,216,138,0.25);
+  --blue: #5b9cf5;
+  --blue-bg: rgba(91,156,245,0.08);
+  --blue-border: rgba(91,156,245,0.25);
+  --purple: #a78bfa;
+  --purple-bg: rgba(167,139,250,0.08);
+  --purple-border: rgba(167,139,250,0.25);
+  --orange: #f59e42;
+  --orange-bg: rgba(245,158,66,0.08);
+  --orange-border: rgba(245,158,66,0.25);
+  --red: #f56565;
+  --red-bg: rgba(245,101,101,0.08);
+  --red-border: rgba(245,101,101,0.25);
+  --yellow: #eab308;
+  --yellow-bg: rgba(234,179,8,0.08);
+  --cyan: #22d3ee;
+  --cyan-bg: rgba(34,211,238,0.08);
+  --cyan-border: rgba(34,211,238,0.25);
+}
+
+body {
+  font-family: 'IBM Plex Sans', sans-serif;
+  background: var(--bg);
+  color: var(--t2);
+  line-height: 1.55;
+}
+
+code, .mono { font-family: 'JetBrains Mono', monospace; font-size: 0.85em; }
+
+.page { max-width: 1400px; margin: 0 auto; padding: 3rem 2rem 6rem; }
+
+/* ── Header ── */
+.header {
+  margin-bottom: 4rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.header h1 {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--t1);
+  margin-bottom: 0.5rem;
+}
+
+.header h1 span { color: var(--green); }
+
+.header p { color: var(--t3); font-size: 0.9rem; }
+
+/* ── Section ── */
+.section {
+  margin-bottom: 4rem;
+}
+
+.section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--t3);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Process Diagram ── */
+.process-map {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Process Box ── */
+.proc {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg1);
+  position: relative;
+}
+
+.proc-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  border-radius: 6px 6px 0 0;
+}
+
+.proc-pid {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.proc-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--t1);
+}
+
+.proc-lang {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  color: var(--t3);
+  margin-left: auto;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.proc-body { padding: 1.25rem; }
+
+/* ── Colored process borders ── */
+.proc-rust { border-color: var(--orange-border); }
+.proc-rust .proc-header { background: var(--orange-bg); }
+.proc-rust .proc-pid { background: var(--orange-bg); color: var(--orange); border: 1px solid var(--orange-border); }
+
+.proc-python { border-color: var(--blue-border); }
+.proc-python .proc-header { background: var(--blue-bg); }
+.proc-python .proc-pid { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-border); }
+
+.proc-sqlite { border-color: var(--cyan-border); }
+.proc-sqlite .proc-header { background: var(--cyan-bg); }
+.proc-sqlite .proc-pid { background: var(--cyan-bg); color: var(--cyan); border: 1px solid var(--cyan-border); }
+
+.proc-fs { border-color: var(--green-border); }
+.proc-fs .proc-header { background: var(--green-bg); }
+.proc-fs .proc-pid { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+
+/* ── Internal blocks ── */
+.internal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.int-block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 0.75rem 1rem;
+}
+
+.int-block-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--t1);
+  margin-bottom: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.int-block-title .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot-green { background: var(--green); }
+.dot-blue { background: var(--blue); }
+.dot-orange { background: var(--orange); }
+.dot-purple { background: var(--purple); }
+.dot-red { background: var(--red); }
+.dot-cyan { background: var(--cyan); }
+.dot-yellow { background: var(--yellow); }
+
+.int-block-body {
+  font-size: 0.75rem;
+  color: var(--t3);
+  line-height: 1.5;
+}
+
+.int-block-body code {
+  color: var(--t2);
+  font-size: 0.7rem;
+}
+
+/* ── Struct display ── */
+.struct-block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 0.75rem 1rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  line-height: 1.7;
+}
+
+.struct-keyword { color: var(--purple); }
+.struct-name { color: var(--orange); font-weight: 600; }
+.struct-type { color: var(--green); }
+.struct-field { color: var(--t2); }
+.struct-comment { color: var(--t3); font-style: italic; }
+
+/* ── Arrow connectors ── */
+.arrow-down {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.5rem 0;
+  position: relative;
+}
+
+.arrow-line {
+  width: 1px;
+  height: 24px;
+  background: var(--border-hi);
+}
+
+.arrow-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  color: var(--t3);
+  padding: 0.2rem 0.6rem;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.arrow-head {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 6px solid var(--border-hi);
+}
+
+/* ── Side by side layout ── */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.split-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
+
+@media (max-width: 900px) {
+  .split { grid-template-columns: 1fr; }
+  .split-3 { grid-template-columns: 1fr; }
+}
+
+/* ── Thread model ── */
+.thread-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.thread-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  color: var(--t3);
+  width: 100px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 0.5rem;
+  border-right: 2px solid var(--border);
+}
+
+.thread-bar {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.t-segment {
+  height: 28px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  font-weight: 500;
+  padding: 0 0.5rem;
+  white-space: nowrap;
+}
+
+.t-seg-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+.t-seg-blue { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-border); }
+.t-seg-orange { background: var(--orange-bg); color: var(--orange); border: 1px solid var(--orange-border); }
+.t-seg-purple { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple-border); }
+.t-seg-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+.t-seg-cyan { background: var(--cyan-bg); color: var(--cyan); border: 1px solid var(--cyan-border); }
+.t-seg-dim { background: var(--bg2); color: var(--t3); border: 1px solid var(--border); }
+
+/* ── Sequence diagram ── */
+.seq-diagram {
+  display: grid;
+  grid-template-columns: 120px 120px 120px 120px;
+  gap: 0;
+  position: relative;
+  margin-top: 1rem;
+}
+
+.seq-actor {
+  text-align: center;
+  padding: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--t1);
+  border-bottom: 2px solid var(--border-hi);
+  margin-bottom: 0.5rem;
+}
+
+.seq-lifeline {
+  position: relative;
+  min-height: 400px;
+}
+
+.seq-lifeline::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: repeating-linear-gradient(to bottom, var(--border-hi) 0px, var(--border-hi) 4px, transparent 4px, transparent 8px);
+}
+
+/* ── Data flow table ── */
+.flow-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-top: 1rem;
+}
+
+.flow-table th {
+  text-align: left;
+  padding: 0.6rem 1rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--t3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  border-bottom: 2px solid var(--border);
+  font-weight: 500;
+}
+
+.flow-table td {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.flow-table tr:hover td { background: var(--bg1); }
+
+.flow-table .ep {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--t1);
+}
+
+.method-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.55rem;
+  font-weight: 700;
+  padding: 0.1rem 0.35rem;
+  border-radius: 2px;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.method-tag.post { background: var(--green-bg); color: var(--green); }
+.method-tag.get { background: var(--blue-bg); color: var(--blue); }
+.method-tag.del { background: var(--red-bg); color: var(--red); }
+
+.flow-table .handler { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--purple); }
+.flow-table .chain { font-size: 0.7rem; color: var(--t3); }
+
+/* ── Memory layout ── */
+.mem-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+  height: 36px;
+}
+
+.mem-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  font-weight: 500;
+  padding: 0 0.75rem;
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.mem-cell:last-child { border-right: none; }
+
+.mem-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  color: var(--t3);
+  margin-bottom: 0.3rem;
+}
+
+/* ── Resource limits vis ── */
+.limit-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.limit-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--t2);
+  width: 80px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.limit-track {
+  flex: 1;
+  height: 18px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  position: relative;
+  overflow: hidden;
+}
+
+.limit-fill {
+  height: 100%;
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  padding-left: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.55rem;
+  font-weight: 600;
+}
+
+.limit-val {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  color: var(--t3);
+  width: 80px;
+  flex-shrink: 0;
+}
+
+/* ── Security visual ── */
+.security-layers {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.sec-ring {
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  width: 100%;
+  position: relative;
+}
+
+.sec-ring-label {
+  position: absolute;
+  top: -0.5rem;
+  left: 1rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0 0.4rem;
+  background: var(--bg);
+}
+
+.sec-ring-1 { border-color: var(--red-border); margin-bottom: -0.5rem; padding-bottom: 1.5rem; }
+.sec-ring-1 .sec-ring-label { color: var(--red); }
+.sec-ring-2 { border-color: var(--orange-border); margin-bottom: -0.5rem; padding-bottom: 1.5rem; }
+.sec-ring-2 .sec-ring-label { color: var(--orange); }
+.sec-ring-3 { border-color: var(--yellow-bg); }
+.sec-ring-3 .sec-ring-label { color: var(--yellow); }
+
+.sec-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.sec-item {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--t2);
+}
+
+/* ── Future arch ── */
+.future-box {
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  background: var(--bg);
+  opacity: 0.6;
+}
+
+.future-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.55rem;
+  color: var(--purple);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.4rem;
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- HEADER -->
+<div class="header">
+  <h1>greed<span>-compute</span> system architecture</h1>
+  <p>Internal technical reference — process model, data flow, threading, security boundaries</p>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 1: PROCESS MAP -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">01 — process map (current implementation)</div>
+
+<div class="process-map">
+
+  <!-- MAIN RUST PROCESS -->
+  <div class="proc proc-rust">
+    <div class="proc-header">
+      <span class="proc-pid">PID 1</span>
+      <span class="proc-name">greed-compute</span>
+      <span class="proc-lang">Rust / Tokio async runtime</span>
+    </div>
+    <div class="proc-body">
+      <div class="internal-grid">
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-orange"></span> Axum HTTP Server</div>
+          <div class="int-block-body">
+            Binds <code>0.0.0.0:8080</code><br>
+            Async request handling via Tokio<br>
+            CORS + tracing middleware layers
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-red"></span> Auth Middleware</div>
+          <div class="int-block-body">
+            Intercepts all requests<br>
+            Validates <code>X-API-Key</code> header<br>
+            Skips: <code>/v1/health</code>, <code>/v1/admin/keys</code>
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-purple"></span> SessionManager</div>
+          <div class="int-block-body">
+            <code>Arc&lt;DashMap&lt;String, Arc&lt;Session&gt;&gt;&gt;</code><br>
+            Lock-free concurrent hashmap<br>
+            O(1) lookup by session_id
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-green"></span> TTL Sweeper</div>
+          <div class="int-block-body">
+            <code>tokio::spawn</code> background task<br>
+            Runs every <code>30s</code><br>
+            Kills expired sessions + wipes workspace
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-blue"></span> PythonRuntime (per session)</div>
+          <div class="int-block-body">
+            <code>Arc&lt;Mutex&lt;PythonRuntime&gt;&gt;</code><br>
+            Currently: PyO3 embedded (GIL-bound)<br>
+            Target: subprocess isolation
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-cyan"></span> Route Handlers</div>
+          <div class="int-block-body">
+            8 endpoints on <code>/v1/*</code><br>
+            JSON request/response<br>
+            <code>spawn_blocking</code> for Python calls
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">Python::with_gil (current) &#x2192; stdin/stdout JSON (target)</div>
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+  </div>
+
+  <!-- PYTHON RUNTIME -->
+  <div class="split">
+    <div class="proc proc-python">
+      <div class="proc-header">
+        <span class="proc-pid">EMBEDDED</span>
+        <span class="proc-name">Python Runtime (current)</span>
+        <span class="proc-lang">PyO3 / CPython 3.x</span>
+      </div>
+      <div class="proc-body">
+        <div class="int-block" style="margin-bottom: 0.75rem">
+          <div class="int-block-title"><span class="dot dot-blue"></span> Execution Model</div>
+          <div class="int-block-body">
+            Embedded in Rust process via PyO3<br>
+            <code>Python::with_gil()</code> acquires GIL per call<br>
+            <code>tokio::task::spawn_blocking</code> prevents async starvation<br>
+            Globals dict persists between calls (session state)<br>
+            stdout captured via <code>io.StringIO</code> redirect
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-orange"></span> Pre-loaded</div>
+          <div class="int-block-body">
+            <code>import numpy as np</code> on every exec<br>
+            No pandas/sklearn/torch yet (MVP)
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="proc proc-python future-box">
+      <div class="proc-header">
+        <span class="proc-pid">PID N</span>
+        <span class="proc-name">Python Sandbox (target)</span>
+        <span class="proc-lang">Subprocess / isolated</span>
+      </div>
+      <div class="proc-body">
+        <div class="future-tag">Phase 1 target</div>
+        <div class="int-block" style="margin-bottom: 0.75rem">
+          <div class="int-block-title"><span class="dot dot-blue"></span> Execution Model</div>
+          <div class="int-block-body">
+            Separate OS process per session<br>
+            Communicates via stdin/stdout JSON<br>
+            Crash-isolated: bad script kills only its process<br>
+            Pre-warmed pool of N processes
+          </div>
+        </div>
+        <div class="int-block">
+          <div class="int-block-title"><span class="dot dot-red"></span> Sandbox Constraints</div>
+          <div class="int-block-body">
+            <code>RLIMIT_AS</code>: 512MB memory cap<br>
+            <code>signal.alarm</code>: 30s CPU timeout<br>
+            No network (seccomp/namespace)<br>
+            Filesystem: only <code>/workspace/{id}/</code><br>
+            Import blocklist enforced
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="split" style="margin-top: 1rem">
+    <!-- SQLITE -->
+    <div class="proc proc-sqlite">
+      <div class="proc-header">
+        <span class="proc-pid">FILE</span>
+        <span class="proc-name">greed-compute.db</span>
+        <span class="proc-lang">SQLite / WAL mode</span>
+      </div>
+      <div class="proc-body">
+        <div class="struct-block">
+          <span class="struct-keyword">TABLE</span> <span class="struct-name">api_keys</span><br>
+          &nbsp;&nbsp;<span class="struct-field">key</span> <span class="struct-type">TEXT PK</span> <span class="struct-comment">// greed_f60a681b...</span><br>
+          &nbsp;&nbsp;<span class="struct-field">name</span> <span class="struct-type">TEXT</span><br>
+          &nbsp;&nbsp;<span class="struct-field">tier</span> <span class="struct-type">TEXT</span> <span class="struct-comment">// free | pro | enterprise</span><br>
+          &nbsp;&nbsp;<span class="struct-field">is_active</span> <span class="struct-type">BOOL</span><br>
+          <br>
+          <span class="struct-keyword">TABLE</span> <span class="struct-name">usage</span><br>
+          &nbsp;&nbsp;<span class="struct-field">api_key</span> <span class="struct-type">TEXT FK</span><br>
+          &nbsp;&nbsp;<span class="struct-field">endpoint</span> <span class="struct-type">TEXT</span><br>
+          &nbsp;&nbsp;<span class="struct-field">duration_ms</span> <span class="struct-type">INT</span><br>
+          &nbsp;&nbsp;<span class="struct-field">timestamp</span> <span class="struct-type">TEXT</span> <span class="struct-comment">// RFC3339</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- FILESYSTEM -->
+    <div class="proc proc-fs">
+      <div class="proc-header">
+        <span class="proc-pid">FS</span>
+        <span class="proc-name">Workspace Filesystem</span>
+        <span class="proc-lang">/tmp/greed-compute/</span>
+      </div>
+      <div class="proc-body">
+        <div class="struct-block">
+          <span class="struct-comment">// per-session isolated directory</span><br>
+          <span class="struct-name">/tmp/greed-compute/</span><br>
+          &nbsp;&nbsp;<span class="struct-field">{session_id}/</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="struct-type">data.csv</span> <span class="struct-comment">// uploaded by agent</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="struct-type">results.csv</span> <span class="struct-comment">// generated by code</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="struct-type">chart.png</span> <span class="struct-comment">// matplotlib output</span><br>
+          <br>
+          <span class="struct-comment">// wiped on terminate or TTL expiry</span><br>
+          <span class="struct-comment">// path traversal blocked by filename validation</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 2: DATA STRUCTURES -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">02 — rust data structures</div>
+
+<div class="split-3">
+  <div class="struct-block">
+    <span class="struct-keyword">struct</span> <span class="struct-name">AppState</span> {<br>
+    &nbsp;&nbsp;<span class="struct-field">sessions</span>: <span class="struct-type">SessionManager</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">db</span>: <span class="struct-type">Database</span>,<br>
+    }<br><br>
+    <span class="struct-comment">// shared via Arc&lt;AppState&gt;</span><br>
+    <span class="struct-comment">// passed to all route handlers</span>
+  </div>
+
+  <div class="struct-block">
+    <span class="struct-keyword">struct</span> <span class="struct-name">Session</span> {<br>
+    &nbsp;&nbsp;<span class="struct-field">info</span>: <span class="struct-type">SessionInfo</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">runtime</span>: <span class="struct-type">Arc&lt;Mutex&lt;PythonRuntime&gt;&gt;</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">workspace</span>: <span class="struct-type">PathBuf</span>,<br>
+    }<br><br>
+    <span class="struct-comment">// stored as Arc&lt;Session&gt; in DashMap</span>
+  </div>
+
+  <div class="struct-block">
+    <span class="struct-keyword">struct</span> <span class="struct-name">SessionInfo</span> {<br>
+    &nbsp;&nbsp;<span class="struct-field">session_id</span>: <span class="struct-type">String</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">created_at</span>: <span class="struct-type">DateTime&lt;Utc&gt;</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">expires_at</span>: <span class="struct-type">DateTime&lt;Utc&gt;</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">calls_used</span>: <span class="struct-type">u64</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">workspace_path</span>: <span class="struct-type">String</span>,<br>
+    }
+  </div>
+
+  <div class="struct-block">
+    <span class="struct-keyword">struct</span> <span class="struct-name">SessionManager</span> {<br>
+    &nbsp;&nbsp;<span class="struct-field">sessions</span>: <span class="struct-type">Arc&lt;DashMap&lt;</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="struct-type">String, Arc&lt;Session&gt;</span><br>
+    &nbsp;&nbsp;<span class="struct-type">&gt;&gt;</span>,<br>
+    }<br><br>
+    <span class="struct-comment">// Clone-able, lock-free reads</span>
+  </div>
+
+  <div class="struct-block">
+    <span class="struct-keyword">struct</span> <span class="struct-name">PythonRuntime</span> {<br>
+    &nbsp;&nbsp;<span class="struct-field">locals_snapshot</span>: <span class="struct-type">Option&lt;Vec&lt;</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="struct-type">(String, String)</span><br>
+    &nbsp;&nbsp;<span class="struct-type">&gt;&gt;</span>,<br>
+    }<br><br>
+    <span class="struct-comment">// will become ChildProcess handle</span>
+  </div>
+
+  <div class="struct-block">
+    <span class="struct-keyword">struct</span> <span class="struct-name">ExecutionResult</span> {<br>
+    &nbsp;&nbsp;<span class="struct-field">stdout</span>: <span class="struct-type">String</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">result</span>: <span class="struct-type">Option&lt;String&gt;</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">error</span>: <span class="struct-type">Option&lt;String&gt;</span>,<br>
+    &nbsp;&nbsp;<span class="struct-field">duration_ms</span>: <span class="struct-type">u64</span>,<br>
+    }
+  </div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 3: THREADING MODEL -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">03 — threading model (execute request)</div>
+
+<div style="overflow-x: auto">
+  <div style="min-width: 700px">
+    <div class="mem-label">Time &#x2192;</div>
+
+    <div class="thread-row">
+      <div class="thread-label">tokio worker</div>
+      <div class="thread-bar">
+        <div class="t-segment t-seg-green" style="flex: 1">recv HTTP</div>
+        <div class="t-segment t-seg-orange" style="flex: 1.5">auth middleware</div>
+        <div class="t-segment t-seg-purple" style="flex: 1">route match</div>
+        <div class="t-segment t-seg-cyan" style="flex: 1">DashMap lookup</div>
+        <div class="t-segment t-seg-dim" style="flex: 4">await spawn_blocking...</div>
+        <div class="t-segment t-seg-green" style="flex: 1">send JSON</div>
+      </div>
+    </div>
+
+    <div class="thread-row">
+      <div class="thread-label">blocking pool</div>
+      <div class="thread-bar">
+        <div class="t-segment t-seg-dim" style="flex: 4.5"></div>
+        <div class="t-segment t-seg-blue" style="flex: 0.5">GIL</div>
+        <div class="t-segment t-seg-blue" style="flex: 3">Python::with_gil { exec }</div>
+        <div class="t-segment t-seg-blue" style="flex: 0.5">release</div>
+        <div class="t-segment t-seg-dim" style="flex: 1.5"></div>
+      </div>
+    </div>
+
+    <div class="thread-row">
+      <div class="thread-label">sweeper task</div>
+      <div class="thread-bar">
+        <div class="t-segment t-seg-dim" style="flex: 9">sleep(30s)</div>
+        <div class="t-segment t-seg-red" style="flex: 1">sweep</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top: 1.5rem">
+  <div class="int-block">
+    <div class="int-block-title"><span class="dot dot-yellow"></span> GIL Bottleneck (current)</div>
+    <div class="int-block-body">
+      PyO3 embeds CPython in the Rust process. <code>Python::with_gil()</code> acquires the Global Interpreter Lock.
+      Only ONE Python execution can run at a time across ALL sessions. <code>spawn_blocking</code> prevents the Tokio
+      async runtime from stalling, but Python calls are serialized. This is why we're moving to subprocess model —
+      each session gets its own process with its own GIL.
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 4: REQUEST ROUTING -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">04 — request routing &amp; handler chain</div>
+
+<table class="flow-table">
+  <thead>
+    <tr>
+      <th>Endpoint</th>
+      <th>Handler</th>
+      <th>Internal Call Chain</th>
+      <th>Blocking?</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ep"><span class="method-tag post">POST</span>/v1/session/create</td>
+      <td class="handler">create_session()</td>
+      <td class="chain">SessionManager::create_session() &#x2192; Uuid::new_v4() &#x2192; fs::create_dir_all &#x2192; DashMap::insert</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag post">POST</span>/v1/session/{id}/execute</td>
+      <td class="handler">execute_code()</td>
+      <td class="chain">DashMap::get &#x2192; spawn_blocking &#x2192; Mutex::blocking_lock &#x2192; Python::with_gil &#x2192; py.run()</td>
+      <td style="color: var(--orange)">Yes (GIL)</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag post">POST</span>/v1/session/{id}/files</td>
+      <td class="handler">upload_file()</td>
+      <td class="chain">DashMap::get &#x2192; Path::file_name (sanitize) &#x2192; base64::decode &#x2192; tokio::fs::write</td>
+      <td>No (async IO)</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag get">GET</span>/v1/session/{id}/output/{f}</td>
+      <td class="handler">read_file()</td>
+      <td class="chain">DashMap::get &#x2192; Path::file_name (sanitize) &#x2192; tokio::fs::read &#x2192; base64::encode</td>
+      <td>No (async IO)</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag get">GET</span>/v1/session/{id}/status</td>
+      <td class="handler">session_status()</td>
+      <td class="chain">DashMap::get &#x2192; Utc::now() &#x2192; ttl_remaining calc</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag del">DEL</span>/v1/session/{id}</td>
+      <td class="handler">terminate_session()</td>
+      <td class="chain">DashMap::remove &#x2192; fs::remove_dir_all (workspace wipe)</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag get">GET</span>/v1/health</td>
+      <td class="handler">health()</td>
+      <td class="chain">sessions.len() &#x2192; JSON response</td>
+      <td>No (skips auth)</td>
+    </tr>
+    <tr>
+      <td class="ep"><span class="method-tag post">POST</span>/v1/admin/keys</td>
+      <td class="handler">create_api_key()</td>
+      <td class="chain">Uuid::new_v4() &#x2192; SQLite INSERT &#x2192; return key</td>
+      <td>No (skips auth)</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 5: SECURITY BOUNDARIES -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">05 — security boundaries</div>
+
+<div class="split">
+  <div>
+    <div class="security-layers">
+      <div class="sec-ring sec-ring-1">
+        <div class="sec-ring-label">ring 1: network</div>
+        <div class="sec-ring sec-ring-2">
+          <div class="sec-ring-label">ring 2: auth</div>
+          <div class="sec-ring sec-ring-3">
+            <div class="sec-ring-label">ring 3: sandbox</div>
+            <div style="text-align: center; padding: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--t1);">
+              user code executes here
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="int-block" style="margin-bottom: 0.75rem">
+      <div class="int-block-title"><span class="dot dot-red"></span> Ring 1: Network</div>
+      <div class="int-block-body">
+        <div class="sec-items">
+          <span class="sec-item">HTTPS termination (reverse proxy)</span>
+          <span class="sec-item">CORS permissive (API-only)</span>
+          <span class="sec-item">Rate limiting (TODO)</span>
+        </div>
+      </div>
+    </div>
+    <div class="int-block" style="margin-bottom: 0.75rem">
+      <div class="int-block-title"><span class="dot dot-orange"></span> Ring 2: Authentication</div>
+      <div class="int-block-body">
+        <div class="sec-items">
+          <span class="sec-item">X-API-Key header required</span>
+          <span class="sec-item">SQLite key lookup</span>
+          <span class="sec-item">is_active flag check</span>
+          <span class="sec-item">Tier-based limits (TODO)</span>
+        </div>
+      </div>
+    </div>
+    <div class="int-block">
+      <div class="int-block-title"><span class="dot dot-yellow"></span> Ring 3: Sandbox (target)</div>
+      <div class="int-block-body">
+        <div class="sec-items">
+          <span class="sec-item">Separate OS process</span>
+          <span class="sec-item">RLIMIT_AS 512MB</span>
+          <span class="sec-item">signal.alarm 30s</span>
+          <span class="sec-item">No network access</span>
+          <span class="sec-item">Filesystem jail</span>
+          <span class="sec-item">Import blocklist</span>
+          <span class="sec-item">Path traversal blocked</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 6: RESOURCE LIMITS -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">06 — resource limits per session (target)</div>
+
+<div class="limit-bar">
+  <div class="limit-name">Memory</div>
+  <div class="limit-track">
+    <div class="limit-fill" style="width: 65%; background: var(--blue-bg); color: var(--blue);">512 MB</div>
+  </div>
+  <div class="limit-val">RLIMIT_AS</div>
+</div>
+<div class="limit-bar">
+  <div class="limit-name">CPU Time</div>
+  <div class="limit-track">
+    <div class="limit-fill" style="width: 50%; background: var(--orange-bg); color: var(--orange);">30 sec</div>
+  </div>
+  <div class="limit-val">SIGALRM</div>
+</div>
+<div class="limit-bar">
+  <div class="limit-name">Disk</div>
+  <div class="limit-track">
+    <div class="limit-fill" style="width: 35%; background: var(--green-bg); color: var(--green);">100 MB</div>
+  </div>
+  <div class="limit-val">/workspace/*</div>
+</div>
+<div class="limit-bar">
+  <div class="limit-name">Network</div>
+  <div class="limit-track">
+    <div class="limit-fill" style="width: 0%; background: var(--red-bg); color: var(--red);"></div>
+  </div>
+  <div class="limit-val" style="color: var(--red)">DISABLED</div>
+</div>
+<div class="limit-bar">
+  <div class="limit-name">Session TTL</div>
+  <div class="limit-track">
+    <div class="limit-fill" style="width: 45%; background: var(--purple-bg); color: var(--purple);">300 sec default</div>
+  </div>
+  <div class="limit-val">sweeper</div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 7: MEMORY LAYOUT -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">07 — memory layout (per 4GB VPS)</div>
+
+<div class="mem-label">Estimated memory distribution</div>
+<div class="mem-row">
+  <div class="mem-cell" style="flex: 1; background: var(--orange-bg); color: var(--orange);">Rust binary ~20MB</div>
+  <div class="mem-cell" style="flex: 1; background: var(--cyan-bg); color: var(--cyan);">SQLite ~5MB</div>
+  <div class="mem-cell" style="flex: 1; background: var(--blue-bg); color: var(--blue);">Python #1 ~150MB</div>
+  <div class="mem-cell" style="flex: 1; background: var(--blue-bg); color: var(--blue);">Python #2 ~150MB</div>
+  <div class="mem-cell" style="flex: 1; background: var(--blue-bg); color: var(--blue);">Python #3 ~150MB</div>
+  <div class="mem-cell" style="flex: 0.5; background: var(--bg2); color: var(--t3);">...</div>
+  <div class="mem-cell" style="flex: 1; background: var(--bg2); color: var(--t3);">OS + headroom</div>
+</div>
+<div style="display: flex; justify-content: space-between; margin-top: 0.5rem">
+  <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.6rem; color: var(--t3);">0 MB</span>
+  <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.6rem; color: var(--t3);">~4096 MB</span>
+</div>
+<div style="margin-top: 0.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--t3);">
+  Rust overhead: ~25MB &bull; Per Python session: ~150MB (numpy+pandas loaded) &bull; Max concurrent on 4GB: ~20 sessions
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 8: EVOLUTION PATH -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">08 — architecture evolution</div>
+
+<div class="split-3">
+  <div class="int-block" style="border-color: var(--green-border)">
+    <div class="int-block-title" style="color: var(--green)"><span class="dot dot-green"></span> Current (v0.1)</div>
+    <div class="int-block-body">
+      Single Rust process<br>
+      PyO3 embedded Python<br>
+      Single GIL (serialized exec)<br>
+      SQLite auth<br>
+      File-based workspace<br>
+      No resource limits<br>
+      No warm pool
+    </div>
+  </div>
+  <div class="int-block" style="border-color: var(--blue-border)">
+    <div class="int-block-title" style="color: var(--blue)"><span class="dot dot-blue"></span> Phase 1 (v1.0)</div>
+    <div class="int-block-body">
+      Subprocess per session<br>
+      Warm pool (3-5 pre-spawned)<br>
+      stdin/stdout JSON protocol<br>
+      Resource limits enforced<br>
+      Import blocklist<br>
+      Rate limiting<br>
+      Pre-loaded ML libraries
+    </div>
+  </div>
+  <div class="int-block" style="border-color: var(--purple-border)">
+    <div class="int-block-title" style="color: var(--purple)"><span class="dot dot-purple"></span> Phase 3 (v2.0)</div>
+    <div class="int-block-body">
+      greed-torch (Rust tensor lib)<br>
+      wgpu compute shaders<br>
+      Burn/CubeCL backend<br>
+      Any-GPU support<br>
+      PyO3 bridge to Rust kernels<br>
+      GPU session tier<br>
+      Multi-node orchestration
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION 9: PRIOR ART & RESEARCH -->
+<!-- ═══════════════════════════════════════════ -->
+<div class="section">
+<div class="section-title">09 — prior art &amp; research papers</div>
+
+<div style="margin-bottom: 2rem">
+  <div class="int-block" style="margin-bottom: 0.75rem; border-color: var(--blue-border)">
+    <div class="int-block-title"><span class="dot dot-blue"></span> LLM-in-Sandbox (arxiv:2601.16206, Jan 2026)</div>
+    <div class="int-block-body">
+      <strong style="color: var(--t1)">Closest academic validation of our approach.</strong><br>
+      Lightweight Python + numpy/scipy only. Model installs its own tools on-the-fly.<br>
+      Key finding: agents spontaneously use filesystem for context management and install packages dynamically.<br>
+      <span style="color: var(--orange)">Implication:</span> consider relaxing network block for pro-tier (allow pip install from whitelist).
+    </div>
+  </div>
+
+  <div class="int-block" style="margin-bottom: 0.75rem; border-color: var(--red-border)">
+    <div class="int-block-title"><span class="dot dot-red"></span> RedCodeAgent (ICLR 2026)</div>
+    <div class="int-block-body">
+      Automated red-teaming of code agents. Tested OpenCodeInterpreter, MetaGPT, Cursor, Codeium.<br>
+      Found real vulnerabilities across <em>all</em> tested agents.<br>
+      <span style="color: var(--orange)">Implication:</span> import blocklist alone is insufficient. Need defense in depth: process isolation + seccomp + filesystem jail + rlimits.
+    </div>
+  </div>
+
+  <div class="int-block" style="margin-bottom: 0.75rem; border-color: var(--purple-border)">
+    <div class="int-block-title"><span class="dot dot-purple"></span> AgentSpec (ICSE '26, April 2026)</div>
+    <div class="int-block-body">
+      Customizable runtime enforcement policies for safe LLM agents.<br>
+      <span style="color: var(--orange)">Implication:</span> expose policy language so enterprise customers can define their own sandbox rules.
+    </div>
+  </div>
+
+  <div class="int-block" style="border-color: var(--cyan-border)">
+    <div class="int-block-title"><span class="dot dot-cyan"></span> Securing AI Agent Execution (arxiv:2510.21236)</div>
+    <div class="int-block-body">
+      Threat model: the workload itself is untrusted (LLM-generated code may be adversarial via prompt injection).<br>
+      <span style="color: var(--orange)">Implication:</span> assume ALL submitted code is potentially malicious, even from "trusted" agents.
+    </div>
+  </div>
+</div>
+
+<div class="section-title" style="border-bottom: none; margin-bottom: 0.75rem">industry systems comparison</div>
+
+<table class="flow-table">
+  <thead>
+    <tr>
+      <th>System</th>
+      <th>Isolation</th>
+      <th>Latency</th>
+      <th>Memory/session</th>
+      <th>ML focus</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="ep">E2B</td>
+      <td>Firecracker microVM (KVM)</td>
+      <td>1-2ms warm, 125ms cold</td>
+      <td>~5MB VM overhead</td>
+      <td class="handler" style="color: var(--t3)">Generic</td>
+    </tr>
+    <tr>
+      <td class="ep">Google Agent Sandbox</td>
+      <td>K8s pods + warm pool CRD</td>
+      <td>sub-second (90% improvement)</td>
+      <td>Pod-dependent</td>
+      <td class="handler" style="color: var(--t3)">Generic</td>
+    </tr>
+    <tr>
+      <td class="ep">Daytona</td>
+      <td>Docker containers</td>
+      <td>27-90ms</td>
+      <td>Container-dependent</td>
+      <td class="handler" style="color: var(--t3)">Generic</td>
+    </tr>
+    <tr>
+      <td class="ep">Monty (Arize)</td>
+      <td>None (AST restriction)</td>
+      <td style="color: var(--green)">3-15 us</td>
+      <td>~0 (same process)</td>
+      <td class="handler" style="color: var(--t3)">None</td>
+    </tr>
+    <tr>
+      <td class="ep">llm-sandbox (OSS)</td>
+      <td>Docker / process</td>
+      <td>~50-200ms</td>
+      <td>~100-200MB</td>
+      <td class="handler" style="color: var(--t3)">None</td>
+    </tr>
+    <tr>
+      <td class="ep" style="color: var(--green)">greed-compute</td>
+      <td style="color: var(--green)">Process sandbox</td>
+      <td style="color: var(--green)">&lt;100ms warm (target)</td>
+      <td style="color: var(--green)">~150MB</td>
+      <td class="handler" style="color: var(--green)">ML-first (numpy, pandas, sklearn, torch)</td>
+    </tr>
+  </tbody>
+</table>
+
+<div style="margin-top: 2rem">
+  <div class="section-title" style="border-bottom: none; margin-bottom: 0.75rem">what the research changes</div>
+
+  <div class="split">
+    <div class="int-block" style="border-color: var(--orange-border)">
+      <div class="int-block-title"><span class="dot dot-orange"></span> Security must be layered</div>
+      <div class="int-block-body">
+        RedCodeAgent proves single-layer defense fails. Our target stack:<br><br>
+        <div class="sec-items">
+          <span class="sec-item">L1: Process isolation (separate PID ns)</span>
+          <span class="sec-item">L2: Syscall filter (seccomp-bpf)</span>
+          <span class="sec-item">L3: Filesystem jail (chroot/bind)</span>
+          <span class="sec-item">L4: Resource limits (cgroups/rlimit)</span>
+          <span class="sec-item">L5: Import blocklist (Python-level)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="int-block" style="border-color: var(--green-border)">
+      <div class="int-block-title"><span class="dot dot-green"></span> Where our moat lives</div>
+      <div class="int-block-body">
+        The sandbox layer is table stakes &mdash; everyone has one.<br><br>
+        <strong style="color: var(--t1)">Phase 1</strong>: ML-aware (pre-loaded libraries) = small edge<br>
+        <strong style="color: var(--t1)">Phase 2</strong>: Distribution (OpenClaw skill, agent-native API) = market timing<br>
+        <strong style="color: var(--green)">Phase 3</strong>: <strong>greed-torch + wgpu</strong> = real moat. Vendor-agnostic GPU compute for agents. Nobody else is building this.
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+</div>
+</body>
+</html>
