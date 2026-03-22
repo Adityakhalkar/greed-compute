@@ -1,0 +1,15 @@
+[Unit]
+Description=greed-compute - ML sandbox for AI agents
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/greed-compute
+ExecStart=/opt/greed-compute/target/release/greed-compute
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=greed_compute=info,tower_http=info
+
+[Install]
+WantedBy=multi-user.target
