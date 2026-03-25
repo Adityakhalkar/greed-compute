@@ -81,9 +81,33 @@ impl Database {
         )?;
         Ok(key)
     }
+
+    pub fn revoke_api_key(&self, key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE api_keys SET is_active = 0 WHERE key = ?1",
+            params![key],
+        ).unwrap_or(0);
+        rows > 0
+    }
+
+    pub fn list_api_keys(&self) -> Vec<ApiKeyInfo> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT key, name, tier, is_active FROM api_keys ORDER BY created_at DESC"
+        ).unwrap();
+        stmt.query_map([], |row| {
+            Ok(ApiKeyInfo {
+                key: row.get(0)?,
+                name: row.get(1)?,
+                tier: row.get(2)?,
+                is_active: row.get(3)?,
+            })
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ApiKeyInfo {
     pub key: String,
     pub name: String,

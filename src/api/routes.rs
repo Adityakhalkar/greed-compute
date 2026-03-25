@@ -19,6 +19,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/session/{id}/files", post(upload_file))
         .route("/session/{id}/output/{filename}", get(read_file))
         .route("/admin/keys", post(create_api_key))
+        .route("/admin/keys", get(list_api_keys))
+        .route("/admin/keys/{key}/revoke", post(revoke_api_key))
 }
 
 // ── Health ──────────────────────────────────────────────
@@ -237,4 +239,22 @@ async fn create_api_key(
             "tier": tier,
         })),
     ))
+}
+
+async fn list_api_keys(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let keys = state.db.list_api_keys();
+    Json(serde_json::json!({ "keys": keys }))
+}
+
+async fn revoke_api_key(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if state.db.revoke_api_key(&key) {
+        (StatusCode::OK, Json(serde_json::json!({ "revoked": true, "key": key })))
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "key not found" })))
+    }
 }
