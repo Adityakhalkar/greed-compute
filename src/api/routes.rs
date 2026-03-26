@@ -127,7 +127,9 @@ async fn execute_code(
         .get_session(&id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let mut runtime = session.runtime.lock().await;
+    // Non-blocking try_lock — if the session is already executing, return 423
+    // immediately instead of queuing. Matches Jupyter's "kernel busy" behavior.
+    let mut runtime = session.runtime.try_lock().map_err(|_| StatusCode::from_u16(423).unwrap())?;
     let result = runtime.execute(&body.code).await;
 
     // Renew TTL on every execute — keeps active notebook sessions alive
