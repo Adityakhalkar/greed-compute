@@ -9,6 +9,10 @@ pub struct ExecutionResult {
     pub result: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
+    /// Base64-encoded PNG images captured from matplotlib plt.show() calls
+    pub plots: Vec<String>,
+    /// HTML string when the last expression was a DataFrame or Series
+    pub html: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -95,6 +99,8 @@ impl PythonRuntime {
                 result: None,
                 error: Some(format!("Failed to write to worker stdin: {}", e)),
                 duration_ms: 0,
+                plots: vec![],
+                html: None,
             };
         }
         if let Err(e) = self.stdin.flush().await {
@@ -103,6 +109,8 @@ impl PythonRuntime {
                 result: None,
                 error: Some(format!("Failed to flush worker stdin: {}", e)),
                 duration_ms: 0,
+                plots: vec![],
+                html: None,
             };
         }
 
@@ -116,6 +124,8 @@ impl PythonRuntime {
                 result: None,
                 error: Some("Worker process died during execution".to_string()),
                 duration_ms: 0,
+                plots: vec![],
+                html: None,
             },
             Ok(Ok(_)) => {
                 match serde_json::from_str::<serde_json::Value>(line.trim()) {
@@ -142,12 +152,28 @@ impl PythonRuntime {
                             .get("duration_ms")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0),
+                        plots: msg
+                            .get("plots")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        html: msg
+                            .get("html")
+                            .and_then(|v| {
+                                if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }
+                            }),
                     },
                     Err(e) => ExecutionResult {
                         stdout: String::new(),
                         result: None,
                         error: Some(format!("Invalid JSON from worker: {}", e)),
                         duration_ms: 0,
+                        plots: vec![],
+                        html: None,
                     },
                 }
             }
@@ -156,12 +182,16 @@ impl PythonRuntime {
                 result: None,
                 error: Some(format!("IO error reading from worker: {}", e)),
                 duration_ms: 0,
+                plots: vec![],
+                html: None,
             },
             Err(_) => ExecutionResult {
                 stdout: String::new(),
                 result: None,
                 error: Some("Execution timed out (35s)".to_string()),
                 duration_ms: 35_000,
+                plots: vec![],
+                html: None,
             },
         }
     }

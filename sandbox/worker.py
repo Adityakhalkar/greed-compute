@@ -8,12 +8,14 @@ JSON results on stdout.
 """
 
 import ast
+import base64 as _base64
 import json
 import io
 import os
 import sys
 import time
 import signal
+import traceback
 import builtins
 import resource
 
@@ -35,6 +37,7 @@ BLOCKED_MODULES = frozenset({
 # which is fine — we only want to block USER code from importing them.
 _preloaded_np = None
 _preloaded_pd = None
+_preloaded_plt = None
 try:
     import numpy as _preloaded_np
 except ImportError:
@@ -49,6 +52,8 @@ except ImportError:
     pass
 try:
     import matplotlib as _preloaded_mpl
+    _preloaded_mpl.use("Agg")  # non-interactive backend, must be set before pyplot import
+    import matplotlib.pyplot as _preloaded_plt
 except ImportError:
     pass
 try:
@@ -126,15 +131,34 @@ def emit(obj):
     sys.stdout.flush()
 
 
+# ── Plot capture ─────────────────────────────────────────────────────────────
+
+def _make_plot_show(plot_store):
+    """Return a plt.show() replacement that captures figures as base64 PNGs."""
+    def _show(*args, **kwargs):
+        if _preloaded_plt is None:
+            return
+        for fig in _preloaded_plt.get_fignums():
+            buf = io.BytesIO()
+            _preloaded_plt.figure(fig).savefig(buf, format="png", bbox_inches="tight", dpi=100)
+            buf.seek(0)
+            plot_store.append(_base64.b64encode(buf.read()).decode("utf-8"))
+            buf.close()
+        _preloaded_plt.close("all")
+    return _show
+
+
 # ── Session state ────────────────────────────────────────────────────────────
 
 def make_session_globals():
-    """Create a fresh session globals dict with numpy/pandas pre-loaded."""
+    """Create a fresh session globals dict with pre-loaded libraries."""
     g = {"__builtins__": builtins}
     if _preloaded_np is not None:
         g["np"] = _preloaded_np
     if _preloaded_pd is not None:
         g["pd"] = _preloaded_pd
+    if _preloaded_plt is not None:
+        g["plt"] = _preloaded_plt
     return g
 
 
@@ -154,7 +178,7 @@ def _split_last_expr(code):
     """
     Parse code and split off the last statement if it's a bare expression.
     Returns (body_code, last_expr_code) where last_expr_code may be None.
-    This mirrors Jupyter's behavior: `a=1\\na` prints the value of a.
+    This mirrors Jupyter's behavior: `a=1\na` prints the value of a.
     """
     try:
         tree = ast.parse(code)
@@ -181,8 +205,14 @@ def handle_execute(code, session_globals):
     captured = io.StringIO()
     start = time.monotonic()
     error = None
+    html = None
+    plot_store = []
 
     body_code, expr_code = _split_last_expr(code)
+
+    # Patch plt.show() to capture figures into plot_store
+    if _preloaded_plt is not None:
+        session_globals["plt"].show = _make_plot_show(plot_store)
 
     # Set alarm for timeout
     old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
@@ -203,14 +233,26 @@ def handle_execute(code, session_globals):
             if expr_code:
                 result = eval(expr_code, session_globals)  # noqa: S307
                 if result is not None:
-                    print(repr(result))
+                    # DataFrame / Series → return HTML table instead of repr
+                    if _preloaded_pd is not None and isinstance(
+                        result, (_preloaded_pd.DataFrame, _preloaded_pd.Series)
+                    ):
+                        html = result.to_html()
+                    else:
+                        print(repr(result))
+
+            # Capture any figures that were created but show() wasn't called
+            if _preloaded_plt is not None and _preloaded_plt.get_fignums():
+                session_globals["plt"].show()
+
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
     except ExecutionTimeout:
         error = f"Execution timed out after {timeout}s"
-    except Exception as e:
-        error = f"{type(e).__name__}: {e}"
+    except Exception:
+        # Full traceback with line numbers
+        error = traceback.format_exc().strip()
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
@@ -221,6 +263,8 @@ def handle_execute(code, session_globals):
         "stdout": captured.getvalue(),
         "error": error,
         "duration_ms": duration_ms,
+        "plots": plot_store,
+        "html": html,
     })
 
 
@@ -233,7 +277,7 @@ def main():
     # 2. Install import hook
     builtins.__import__ = _restricted_import
 
-    # 3. Pre-load numpy/pandas into session globals
+    # 3. Pre-load libraries into session globals
     session_globals = make_session_globals()
 
     # 4. Signal readiness
@@ -248,7 +292,7 @@ def main():
         try:
             msg = json.loads(line)
         except json.JSONDecodeError as e:
-            emit({"type": "result", "stdout": "", "error": f"Invalid JSON: {e}", "duration_ms": 0})
+            emit({"type": "result", "stdout": "", "error": f"Invalid JSON: {e}", "duration_ms": 0, "plots": [], "html": None})
             continue
 
         msg_type = msg.get("type")
@@ -261,7 +305,7 @@ def main():
             code = msg.get("code", "")
             handle_execute(code, session_globals)
         else:
-            emit({"type": "result", "stdout": "", "error": f"Unknown command type: {msg_type}", "duration_ms": 0})
+            emit({"type": "result", "stdout": "", "error": f"Unknown command type: {msg_type}", "duration_ms": 0, "plots": [], "html": None})
 
 
 if __name__ == "__main__":

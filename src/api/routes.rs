@@ -111,6 +111,10 @@ struct ExecuteResponse {
     result: Option<String>,
     error: Option<String>,
     duration_ms: u64,
+    /// Base64-encoded PNG images from matplotlib plt.show() calls
+    plots: Vec<String>,
+    /// HTML table when the last expression was a DataFrame or Series
+    html: Option<String>,
 }
 
 async fn execute_code(
@@ -131,6 +135,8 @@ async fn execute_code(
         result: result.result,
         error: result.error,
         duration_ms: result.duration_ms,
+        plots: result.plots,
+        html: result.html,
     }))
 }
 
