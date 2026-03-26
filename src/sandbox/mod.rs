@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use crate::runtime::PythonRuntime;
 
-const DEFAULT_TTL_SECS: i64 = 300;
+const DEFAULT_TTL_SECS: i64 = 120; // 2 minutes — aggressive cleanup on shared VPS
 const SWEEPER_INTERVAL_SECS: u64 = 30;
-const WARM_POOL_SIZE: usize = 3;
+const WARM_POOL_SIZE: usize = 1;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInfo {
