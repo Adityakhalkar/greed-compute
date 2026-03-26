@@ -118,11 +118,11 @@ A single execution can have stdout, html, plots, and/or an error. Render in this
 
 ---
 
-## 5. Session TTL Update
+## 5. Session TTL — Auto-Renewal
 
-Sessions now last **15 minutes** (up from 2 minutes). If you have any frontend session expiry warnings or timers, update them accordingly.
+Sessions now last **15 minutes** (up from 2 minutes), and the TTL **resets on every execute call**. An active notebook session will never expire mid-work as long as the user keeps running code.
 
-The `expires_at` field in the create session response is the source of truth:
+The `expires_at` field in the create session response is the initial expiry, but it gets pushed forward with every execution:
 
 ```json
 {
@@ -131,3 +131,21 @@ The `expires_at` field in the create session response is the source of truth:
     "expires_at": "2026-03-26T..."
 }
 ```
+
+Remove any fixed expiry countdown timers. If you want to show a "session idle" warning, use the `/v1/session/{id}/status` endpoint which returns the live `ttl_remaining` in seconds.
+
+---
+
+## 6. Kernel Busy — HTTP 423
+
+If a cell is still executing and the user runs another cell, the API returns **HTTP 423 Locked** immediately.
+
+```js
+if (response.status === 423) {
+    // Show "kernel busy" indicator
+    // Optionally retry after a short delay
+    setTimeout(() => executeCell(code), 1000);
+}
+```
+
+Do not retry in a tight loop — wait at least 500ms between retries.
