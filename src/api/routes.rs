@@ -130,6 +130,9 @@ async fn execute_code(
     let mut runtime = session.runtime.lock().await;
     let result = runtime.execute(&body.code).await;
 
+    // Renew TTL on every execute — keeps active notebook sessions alive
+    session.touch();
+
     Ok(Json(ExecuteResponse {
         stdout: result.stdout,
         result: result.result,

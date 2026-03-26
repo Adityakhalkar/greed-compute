@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -9,7 +10,7 @@ use crate::runtime::PythonRuntime;
 
 const DEFAULT_TTL_SECS: i64 = 900; // 15 minutes — dedicated VPS, suits notebook workflows
 const SWEEPER_INTERVAL_SECS: u64 = 30;
-const WARM_POOL_SIZE: usize = 1;
+const WARM_POOL_SIZE: usize = 3;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInfo {
@@ -22,8 +23,30 @@ pub struct SessionInfo {
 
 pub struct Session {
     pub info: SessionInfo,
+    /// Unix timestamp (seconds). Updated atomically on every execute call.
+    expires_at_secs: AtomicI64,
+    /// Total execute calls made on this session.
+    calls_used: AtomicU64,
     pub runtime: Arc<Mutex<PythonRuntime>>,
     pub workspace: PathBuf,
+}
+
+impl Session {
+    /// Reset the TTL to DEFAULT_TTL_SECS from now. Called on every execute.
+    pub fn touch(&self) {
+        let new_expiry = Utc::now().timestamp() + DEFAULT_TTL_SECS;
+        self.expires_at_secs.store(new_expiry, Ordering::Relaxed);
+        self.calls_used.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        let ts = self.expires_at_secs.load(Ordering::Relaxed);
+        DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+    }
+
+    pub fn calls_used(&self) -> u64 {
+        self.calls_used.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone)]
@@ -119,6 +142,8 @@ impl SessionManager {
 
         let session = Arc::new(Session {
             info: info.clone(),
+            expires_at_secs: AtomicI64::new(expires_at.timestamp()),
+            calls_used: AtomicU64::new(0),
             runtime: Arc::new(Mutex::new(runtime)),
             workspace,
         });
@@ -144,11 +169,11 @@ impl SessionManager {
 
     pub fn get_session_status(&self, session_id: &str) -> Option<SessionStatus> {
         self.sessions.get(session_id).map(|s| {
-            let remaining = (s.info.expires_at - Utc::now()).num_seconds().max(0);
+            let remaining = (s.expires_at() - Utc::now()).num_seconds().max(0);
             SessionStatus {
                 active: true,
                 ttl_remaining: remaining,
-                calls_used: s.info.calls_used,
+                calls_used: s.calls_used(),
                 session_id: s.info.session_id.clone(),
             }
         })
@@ -172,7 +197,7 @@ impl SessionManager {
             let expired: Vec<String> = self
                 .sessions
                 .iter()
-                .filter(|entry| entry.value().info.expires_at < now)
+                .filter(|entry| entry.value().expires_at() < now)
                 .map(|entry| entry.key().clone())
                 .collect();
 
