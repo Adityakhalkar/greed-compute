@@ -7,6 +7,7 @@ executes user code in a restricted environment, and returns
 JSON results on stdout.
 """
 
+import ast
 import json
 import io
 import os
@@ -145,11 +146,39 @@ def handle_clear(session_globals):
     emit({"type": "cleared"})
 
 
+def _split_last_expr(code):
+    """
+    Parse code and split off the last statement if it's a bare expression.
+    Returns (body_code, last_expr_code) where last_expr_code may be None.
+    This mirrors Jupyter's behavior: `a=1\\na` prints the value of a.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code, None
+
+    if not tree.body:
+        return code, None
+
+    last = tree.body[-1]
+    if not isinstance(last, ast.Expr):
+        return code, None
+
+    # Split the source at the last statement's line
+    lines = code.splitlines(keepends=True)
+    last_line = last.lineno - 1  # ast lines are 1-indexed
+    body_code = "".join(lines[:last_line])
+    expr_code = "".join(lines[last_line:])
+    return body_code, expr_code
+
+
 def handle_execute(code, session_globals):
     timeout = get_cpu_timeout()
     captured = io.StringIO()
     start = time.monotonic()
     error = None
+
+    body_code, expr_code = _split_last_expr(code)
 
     # Set alarm for timeout
     old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
@@ -164,7 +193,13 @@ def handle_execute(code, session_globals):
             # NOTE: exec() is intentional — this is a sandbox worker whose
             # entire purpose is to run user-submitted code within a restricted
             # environment (blocked imports, resource limits, timeouts).
-            exec(code, session_globals)  # noqa: S102
+            if body_code.strip():
+                exec(body_code, session_globals)  # noqa: S102
+
+            if expr_code:
+                result = eval(expr_code, session_globals)  # noqa: S307
+                if result is not None:
+                    print(repr(result))
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
