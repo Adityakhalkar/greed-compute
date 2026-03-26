@@ -20,10 +20,14 @@ import resource
 # ── Blocked modules ──────────────────────────────────────────────────────────
 
 BLOCKED_MODULES = frozenset({
-    "subprocess", "shutil", "socket", "http", "urllib",
-    "ftplib", "smtplib", "telnetlib", "xmlrpc",
-    "ctypes", "multiprocessing", "threading",
+    # Network access
+    "socket", "http", "urllib", "ftplib", "smtplib", "telnetlib", "xmlrpc",
+    # Process spawning
+    "subprocess", "multiprocessing",
+    # Low-level / escape hatches
+    "ctypes", "threading",
     "code", "codeop", "compileall", "pkgutil", "zipimport",
+    # shutil is intentionally NOT blocked — pandas/scipy use it internally
 })
 
 # Pre-load ML libraries BEFORE installing the import hook.
@@ -57,7 +61,7 @@ _original_import = builtins.__import__
 # Neuter dangerous modules that were pulled in as dependencies.
 # They're in sys.modules but we replace them with dummy objects so
 # user code can't call their functions.
-NEUTERED_MODULES = {"subprocess", "shutil", "socket", "multiprocessing"}
+NEUTERED_MODULES = {"subprocess", "socket", "multiprocessing"}
 
 class _NeuteredModule:
     """A dummy module that raises on any attribute access."""
