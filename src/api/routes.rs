@@ -1,11 +1,14 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::sse::{Event, Sse},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 use crate::AppState;
 
@@ -16,6 +19,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/session/{id}", delete(terminate_session))
         .route("/session/{id}/status", get(session_status))
         .route("/session/{id}/execute", post(execute_code))
+        .route("/session/{id}/execute/stream", post(execute_code_stream))
         .route("/session/{id}/install", post(install_packages))
         .route("/session/{id}/files", post(upload_file))
         .route("/session/{id}/output/{filename}", get(read_file))
@@ -161,6 +165,46 @@ async fn execute_code(
         plots: result.plots,
         html: result.html,
     }))
+}
+
+async fn execute_code_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ExecuteRequest>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // 423 if already executing — check then immediately release so the spawned task can lock
+    if session.runtime.try_lock().is_err() {
+        return Err(StatusCode::from_u16(423).unwrap());
+    }
+
+    let (tx, rx) = mpsc::channel::<String>(64);
+
+    let session_clone = session.clone();
+    let code = body.code.clone();
+
+    tokio::spawn(async move {
+        let mut runtime = session_clone.runtime.lock().await;
+        let result = runtime.execute_streaming(&code, tx.clone()).await;
+        session_clone.touch();
+        // Send the final result as the last SSE event
+        let final_json = serde_json::json!({
+            "type": "result",
+            "stdout": result.stdout,
+            "error": result.error,
+            "duration_ms": result.duration_ms,
+            "plots": result.plots,
+            "html": result.html,
+        });
+        let _ = tx.send(final_json.to_string()).await;
+    });
+
+    let stream = ReceiverStream::new(rx).map(|line| {
+        Ok::<Event, Infallible>(Event::default().data(line))
+    });
+
+    Ok(Sse::new(stream))
 }
 
 // ── Package Installation ─────────────────────────────────

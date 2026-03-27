@@ -149,10 +149,42 @@ def _alarm_handler(signum, frame):
 
 # ── Output helpers ───────────────────────────────────────────────────────────
 
+# Save the real process stdout before any redirection.
+# All protocol messages (stream events, results) go here directly.
+_PROTOCOL_STDOUT = sys.stdout
+
 def emit(obj):
-    """Write a single JSON line to stdout and flush immediately."""
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    """Write a single JSON line to the protocol stdout and flush immediately."""
+    _PROTOCOL_STDOUT.write(json.dumps(obj) + "\n")
+    _PROTOCOL_STDOUT.flush()
+
+
+class _StreamingCapture:
+    """
+    Stdout/stderr replacement used during streaming execution.
+    Each complete line is immediately emitted as a {"type":"stream"} event
+    so the client sees output in real-time. The full text is also kept
+    for the final {"type":"result"} message.
+    """
+    def __init__(self):
+        self._captured = io.StringIO()
+        self._linebuf = ""
+
+    def write(self, data):
+        self._captured.write(data)
+        self._linebuf += data
+        while "\n" in self._linebuf:
+            line, self._linebuf = self._linebuf.split("\n", 1)
+            emit({"type": "stream", "data": line + "\n"})
+
+    def flush(self):
+        # Flush any partial line (no trailing newline yet)
+        if self._linebuf:
+            emit({"type": "stream", "data": self._linebuf})
+            self._linebuf = ""
+
+    def getvalue(self):
+        return self._captured.getvalue()
 
 
 # ── Plot capture ─────────────────────────────────────────────────────────────
@@ -281,9 +313,8 @@ def _split_last_expr(code):
     return body_code, expr_code
 
 
-def handle_execute(code, session_globals):
+def handle_execute(code, session_globals, streaming=False):
     timeout = get_cpu_timeout()
-    captured = io.StringIO()
     start = time.monotonic()
     error = None
     html = None
@@ -298,6 +329,10 @@ def handle_execute(code, session_globals):
     # Set alarm for timeout
     old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
     signal.alarm(timeout)
+
+    # Streaming mode: emit each print line immediately as it happens.
+    # Non-streaming mode: buffer everything, return in one response.
+    captured = _StreamingCapture() if streaming else io.StringIO()
 
     try:
         old_stdout = sys.stdout
@@ -386,7 +421,8 @@ def main():
             handle_install(msg.get("packages", []))
         elif msg_type == "execute":
             code = msg.get("code", "")
-            handle_execute(code, session_globals)
+            streaming = msg.get("stream", False)
+            handle_execute(code, session_globals, streaming=streaming)
         else:
             emit({"type": "result", "stdout": "", "error": f"Unknown command type: {msg_type}", "duration_ms": 0, "plots": [], "html": None})
 

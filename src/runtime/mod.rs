@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -21,6 +22,8 @@ struct WorkerCommand {
     cmd_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 pub struct PythonRuntime {
@@ -86,6 +89,7 @@ impl PythonRuntime {
         let cmd = WorkerCommand {
             cmd_type: "execute".to_string(),
             code: Some(code.to_string()),
+            stream: Some(false),
         };
 
         let mut cmd_json =
@@ -196,6 +200,91 @@ impl PythonRuntime {
         }
     }
 
+    /// Streaming execution — sends {"type":"stream"} lines to `tx` as they arrive,
+    /// then returns the final ExecutionResult when {"type":"result"} is received.
+    pub async fn execute_streaming(
+        &mut self,
+        code: &str,
+        tx: mpsc::Sender<String>,
+    ) -> ExecutionResult {
+        let cmd = WorkerCommand {
+            cmd_type: "execute".to_string(),
+            code: Some(code.to_string()),
+            stream: Some(true),
+        };
+
+        let mut cmd_json = serde_json::to_string(&cmd)
+            .unwrap_or_else(|_| r#"{"type":"execute","code":"","stream":true}"#.to_string());
+        cmd_json.push('\n');
+
+        if self.stdin.write_all(cmd_json.as_bytes()).await.is_err()
+            || self.stdin.flush().await.is_err()
+        {
+            return ExecutionResult {
+                stdout: String::new(),
+                result: None,
+                error: Some("Failed to send execute command".into()),
+                duration_ms: 0,
+                plots: vec![],
+                html: None,
+            };
+        }
+
+        // Read lines until we get {"type":"result"}. Intermediate {"type":"stream"}
+        // lines are forwarded to the SSE channel.
+        let deadline = Duration::from_secs(35);
+        loop {
+            let mut line = String::new();
+            match timeout(deadline, self.reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => {
+                    return ExecutionResult {
+                        stdout: String::new(),
+                        result: None,
+                        error: Some("Worker process died during execution".into()),
+                        duration_ms: 0,
+                        plots: vec![],
+                        html: None,
+                    };
+                }
+                Ok(Ok(_)) => {
+                    let trimmed = line.trim();
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        match msg.get("type").and_then(|v| v.as_str()) {
+                            Some("stream") => {
+                                // Forward stream chunk to SSE channel; ignore send errors
+                                // (client may have disconnected).
+                                let _ = tx.send(trimmed.to_string()).await;
+                            }
+                            Some("result") => {
+                                return ExecutionResult {
+                                    stdout: msg.get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    result: msg.get("result").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    error: msg.get("error").and_then(|v| if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }),
+                                    duration_ms: msg.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    plots: msg.get("plots").and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                        .unwrap_or_default(),
+                                    html: msg.get("html").and_then(|v| if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }),
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {
+                    return ExecutionResult {
+                        stdout: String::new(),
+                        result: None,
+                        error: Some("Execution timed out (35s)".into()),
+                        duration_ms: 35_000,
+                        plots: vec![],
+                        html: None,
+                    };
+                }
+            }
+        }
+    }
+
     pub async fn install_packages(&mut self, packages: &[String]) -> (String, Option<String>, u64) {
         #[derive(serde::Serialize)]
         struct InstallCmd<'a> {
@@ -238,6 +327,7 @@ impl PythonRuntime {
         let cmd = WorkerCommand {
             cmd_type: "clear".to_string(),
             code: None,
+            stream: None,
         };
         let mut cmd_json = serde_json::to_string(&cmd).unwrap_or_else(|_| r#"{"type":"clear"}"#.to_string());
         cmd_json.push('\n');
