@@ -149,3 +149,54 @@ if (response.status === 423) {
 ```
 
 Do not retry in a tight loop — wait at least 500ms between retries.
+
+---
+
+## 7. Streaming Execution
+
+**Endpoint:** `POST /session/{id}/execute/stream`
+
+Same request body as the regular execute endpoint. Returns an SSE stream instead of JSON.
+
+**Event types:**
+- `{"type":"stream","data":"line\n"}` — a print() line, arrives in real-time
+- `{"type":"result",...}` — final event, same shape as the regular execute response
+
+**Frontend logic:**
+
+```js
+const response = await fetch(`/v1/session/${sessionId}/execute/stream`, {
+    method: 'POST',
+    headers: {
+        'X-API-Key': apiKey,
+        'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ code }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const text = decoder.decode(value);
+    for (const line of text.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const event = JSON.parse(line.slice(6));
+
+        if (event.type === 'stream') {
+            // Append to output in real-time
+            outputElement.innerText += event.data;
+        } else if (event.type === 'result') {
+            // Execution complete — handle plots, html, error
+            if (event.html) outputElement.innerHTML = event.html;
+            if (event.plots?.length) renderPlots(event.plots);
+            if (event.error) renderError(event.error);
+        }
+    }
+}
+```
+
+Use the streaming endpoint for all code execution — it's strictly better than the regular endpoint since you get real-time output AND the same final result.
