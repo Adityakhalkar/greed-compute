@@ -16,6 +16,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/session/{id}", delete(terminate_session))
         .route("/session/{id}/status", get(session_status))
         .route("/session/{id}/execute", post(execute_code))
+        .route("/session/{id}/install", post(install_packages))
         .route("/session/{id}/files", post(upload_file))
         .route("/session/{id}/output/{filename}", get(read_file))
         .route("/admin/keys", post(create_api_key))
@@ -40,35 +41,52 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct CreateSessionRequest {
     ttl_seconds: Option<i64>,
+    /// Packages to pip install before the session is ready
+    packages: Option<Vec<String>>,
 }
 
 async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.sessions.create_session(body.ttl_seconds).await {
-        Ok(info) => {
-            tracing::info!(session_id = %info.session_id, "Session created");
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "session_id": info.session_id,
-                    "created_at": info.created_at,
-                    "expires_at": info.expires_at,
-                    "workspace_path": info.workspace_path,
-                })),
-            )
-        }
+    let session = match state.sessions.create_session(body.ttl_seconds).await {
+        Ok(info) => info,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create session");
-            (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to create session: {}", e),
-                })),
-            )
+                Json(serde_json::json!({ "error": format!("Failed to create session: {}", e) })),
+            );
+        }
+    };
+
+    // Pre-install packages if requested
+    let mut install_output = None;
+    let mut install_error = None;
+    if let Some(packages) = &body.packages {
+        if !packages.is_empty() {
+            tracing::info!(session_id = %session.session_id, packages = ?packages, "Pre-installing packages");
+            if let Some(s) = state.sessions.get_session(&session.session_id) {
+                let mut runtime = s.runtime.lock().await;
+                let (stdout, error, _) = runtime.install_packages(packages).await;
+                install_output = Some(stdout);
+                install_error = error;
+            }
         }
     }
+
+    tracing::info!(session_id = %session.session_id, "Session created");
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "session_id": session.session_id,
+            "created_at": session.created_at,
+            "expires_at": session.expires_at,
+            "workspace_path": session.workspace_path,
+            "install_output": install_output,
+            "install_error": install_error,
+        })),
+    )
 }
 
 async fn terminate_session(
@@ -143,6 +161,30 @@ async fn execute_code(
         plots: result.plots,
         html: result.html,
     }))
+}
+
+// ── Package Installation ─────────────────────────────────
+
+#[derive(Deserialize)]
+struct InstallRequest {
+    packages: Vec<String>,
+}
+
+async fn install_packages(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<InstallRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut runtime = session.runtime.try_lock().map_err(|_| StatusCode::from_u16(423).unwrap())?;
+    let (stdout, error, duration_ms) = runtime.install_packages(&body.packages).await;
+
+    Ok(Json(serde_json::json!({
+        "stdout": stdout,
+        "error": error,
+        "duration_ms": duration_ms,
+    })))
 }
 
 // ── File Operations ─────────────────────────────────────

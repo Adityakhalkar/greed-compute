@@ -196,6 +196,44 @@ impl PythonRuntime {
         }
     }
 
+    pub async fn install_packages(&mut self, packages: &[String]) -> (String, Option<String>, u64) {
+        #[derive(serde::Serialize)]
+        struct InstallCmd<'a> {
+            #[serde(rename = "type")]
+            cmd_type: &'static str,
+            packages: &'a [String],
+        }
+
+        let mut cmd_json = serde_json::to_string(&InstallCmd {
+            cmd_type: "install",
+            packages,
+        })
+        .unwrap_or_else(|_| r#"{"type":"install","packages":[]}"#.to_string());
+        cmd_json.push('\n');
+
+        if self.stdin.write_all(cmd_json.as_bytes()).await.is_err()
+            || self.stdin.flush().await.is_err()
+        {
+            return (String::new(), Some("Failed to send install command".into()), 0);
+        }
+
+        let mut line = String::new();
+        // pip installs can be slow — allow up to 130s
+        match timeout(Duration::from_secs(130), self.reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    let stdout = msg.get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let error = msg.get("error").and_then(|v| if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) });
+                    let duration_ms = msg.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    (stdout, error, duration_ms)
+                } else {
+                    (String::new(), Some("Invalid response from worker".into()), 0)
+                }
+            }
+            _ => (String::new(), Some("Install timed out or worker died".into()), 0),
+        }
+    }
+
     pub async fn clear_state(&mut self) {
         let cmd = WorkerCommand {
             cmd_type: "clear".to_string(),

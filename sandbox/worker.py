@@ -12,12 +12,17 @@ import base64 as _base64
 import json
 import io
 import os
+import re
 import sys
 import time
 import signal
 import traceback
 import builtins
 import resource
+
+# Capture subprocess BEFORE it gets neutered — used internally for pip only.
+# User code never gets access to this reference.
+import subprocess as _pip_subprocess
 
 # ── Blocked modules ──────────────────────────────────────────────────────────
 
@@ -174,6 +179,42 @@ def handle_clear(session_globals):
     emit({"type": "cleared"})
 
 
+# Only allow safe package name characters — prevents command injection.
+_SAFE_PACKAGE_RE = re.compile(r'^[A-Za-z0-9_\-\.\[\]~=<>!]+$')
+
+def handle_install(packages):
+    """Install packages into the sandbox venv via pip."""
+    if not packages:
+        emit({"type": "install_result", "stdout": "", "error": "No packages specified"})
+        return
+
+    # Validate every package name before passing to pip
+    for pkg in packages:
+        if not _SAFE_PACKAGE_RE.match(pkg):
+            emit({"type": "install_result", "stdout": "", "error": f"Invalid package name: '{pkg}'"})
+            return
+
+    start = time.monotonic()
+    try:
+        proc = _pip_subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--no-warn-script-location"] + packages,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = proc.stdout + proc.stderr
+        error = None if proc.returncode == 0 else f"pip exited with code {proc.returncode}"
+    except _pip_subprocess.TimeoutExpired:
+        output = ""
+        error = "pip install timed out after 120s"
+    except Exception as e:
+        output = ""
+        error = str(e)
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    emit({"type": "install_result", "stdout": output, "error": error, "duration_ms": duration_ms})
+
+
 def _split_last_expr(code):
     """
     Parse code and split off the last statement if it's a bare expression.
@@ -301,6 +342,8 @@ def main():
             handle_ping()
         elif msg_type == "clear":
             handle_clear(session_globals)
+        elif msg_type == "install":
+            handle_install(msg.get("packages", []))
         elif msg_type == "execute":
             code = msg.get("code", "")
             handle_execute(code, session_globals)
