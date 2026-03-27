@@ -182,6 +182,23 @@ def handle_clear(session_globals):
 # Only allow safe package name characters — prevents command injection.
 _SAFE_PACKAGE_RE = re.compile(r'^[A-Za-z0-9_\-\.\[\]~=<>!]+$')
 
+# GPU-heavy libraries blocked on CPU-only tier.
+# These require CUDA and are too large for this instance.
+_BLOCKED_PACKAGES = frozenset({
+    "torch", "pytorch", "torchvision", "torchaudio", "torchtext",
+    "tensorflow", "tensorflow-gpu", "tensorflow-cpu", "tf-nightly",
+    "jax", "jaxlib",
+    "cupy", "cupy-cuda11x", "cupy-cuda12x",
+    "paddle", "paddlepaddle", "paddlepaddle-gpu",
+    "mxnet", "mxnet-cu112",
+    "onnxruntime-gpu",
+    "nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12",
+})
+
+def _base_package_name(pkg):
+    """Extract bare package name from a specifier like 'numpy>=1.0' or 'torch==2.0'."""
+    return re.split(r'[=<>!~\[]', pkg)[0].lower().replace("_", "-")
+
 def handle_install(packages):
     """Install packages into the sandbox venv via pip."""
     if not packages:
@@ -192,6 +209,10 @@ def handle_install(packages):
     for pkg in packages:
         if not _SAFE_PACKAGE_RE.match(pkg):
             emit({"type": "install_result", "stdout": "", "error": f"Invalid package name: '{pkg}'"})
+            return
+        if _base_package_name(pkg) in _BLOCKED_PACKAGES:
+            emit({"type": "install_result", "stdout": "",
+                  "error": f"'{_base_package_name(pkg)}' requires a GPU instance and is not available on the CPU tier. GPU support is coming soon."})
             return
 
     start = time.monotonic()
