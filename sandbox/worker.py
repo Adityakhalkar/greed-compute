@@ -27,14 +27,14 @@ import subprocess as _pip_subprocess
 # ── Blocked modules ──────────────────────────────────────────────────────────
 
 BLOCKED_MODULES = frozenset({
-    # Network access
-    "socket", "http", "urllib", "ftplib", "smtplib", "telnetlib", "xmlrpc",
+    # Network access — urllib is pre-loaded and neutered below instead of blocked
+    # so that packages like seaborn can import it without making real network calls
+    "socket", "http", "ftplib", "smtplib", "telnetlib", "xmlrpc",
     # Process spawning
     "subprocess", "multiprocessing",
     # Low-level / escape hatches
     "ctypes", "threading",
     "code", "codeop", "compileall", "pkgutil", "zipimport",
-    # shutil is intentionally NOT blocked — pandas/scipy use it internally
 })
 
 # Pre-load ML libraries BEFORE installing the import hook.
@@ -66,12 +66,31 @@ try:
 except ImportError:
     pass
 
+# Pre-load urllib and neuter its network functions so packages like seaborn
+# can import it (they use urllib.parse, urllib.request module structure) but
+# user code cannot make real network calls.
+def _network_blocked(*args, **kwargs):
+    raise PermissionError("Network access is disabled in the greed-compute sandbox")
+
+try:
+    import urllib as _preloaded_urllib
+    import urllib.request as _preloaded_urllib_request
+    import urllib.parse   # safe — just URL string manipulation
+    import urllib.error
+    # Neuter every outbound-network function in urllib.request
+    for _fn in ("urlopen", "urlretrieve", "urlcleanup", "install_opener",
+                "build_opener", "pathname2url", "url2pathname"):
+        if hasattr(_preloaded_urllib_request, _fn):
+            setattr(_preloaded_urllib_request, _fn, _network_blocked)
+except ImportError:
+    pass
+
 _original_import = builtins.__import__
 
 # Neuter dangerous modules that were pulled in as dependencies.
 # They're in sys.modules but we replace them with dummy objects so
 # user code can't call their functions.
-NEUTERED_MODULES = {"subprocess", "socket", "multiprocessing"}
+NEUTERED_MODULES = {"subprocess", "socket", "multiprocessing", "http"}
 
 class _NeuteredModule:
     """A dummy module that raises on any attribute access."""
