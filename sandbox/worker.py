@@ -66,6 +66,12 @@ try:
 except ImportError:
     pass
 
+# Pre-load dill for checkpointing — must happen before the import hook.
+try:
+    import dill as _preloaded_dill
+except ImportError:
+    _preloaded_dill = None
+
 # Pre-load urllib and neuter its network functions so packages like seaborn
 # can import it (they use urllib.parse, urllib.request module structure) but
 # user code cannot make real network calls.
@@ -287,6 +293,39 @@ def handle_install(packages):
     emit({"type": "install_result", "stdout": output, "error": error, "duration_ms": duration_ms})
 
 
+def handle_checkpoint(path, session_globals):
+    """Serialize session state to disk using dill."""
+    if _preloaded_dill is None:
+        emit({"type": "checkpoint_result", "size_bytes": 0, "error": "dill not installed in venv"})
+        return
+    # Save everything except __builtins__ — it's always re-injected on restore
+    to_save = {k: v for k, v in session_globals.items() if k != "__builtins__"}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            _preloaded_dill.dump(to_save, f, recurse=True)
+        size = os.path.getsize(path)
+        emit({"type": "checkpoint_result", "size_bytes": size, "error": None})
+    except Exception as e:
+        emit({"type": "checkpoint_result", "size_bytes": 0, "error": str(e)})
+
+
+def handle_restore(path, session_globals):
+    """Deserialize session state from disk and merge into current globals."""
+    if _preloaded_dill is None:
+        emit({"type": "restore_result", "vars": [], "error": "dill not installed in venv"})
+        return
+    try:
+        with open(path, "rb") as f:
+            restored = _preloaded_dill.load(f)
+        session_globals.update(restored)
+        session_globals["__builtins__"] = builtins  # always re-inject
+        user_vars = [k for k in restored if not k.startswith("_")]
+        emit({"type": "restore_result", "vars": user_vars, "error": None})
+    except Exception as e:
+        emit({"type": "restore_result", "vars": [], "error": str(e)})
+
+
 def _split_last_expr(code):
     """
     Parse code and split off the last statement if it's a bare expression.
@@ -423,6 +462,10 @@ def main():
             code = msg.get("code", "")
             streaming = msg.get("stream", False)
             handle_execute(code, session_globals, streaming=streaming)
+        elif msg_type == "checkpoint":
+            handle_checkpoint(msg.get("path", ""), session_globals)
+        elif msg_type == "restore":
+            handle_restore(msg.get("path", ""), session_globals)
         else:
             emit({"type": "result", "stdout": "", "error": f"Unknown command type: {msg_type}", "duration_ms": 0, "plots": [], "html": None})
 

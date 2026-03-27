@@ -33,8 +33,19 @@ impl Database {
                 FOREIGN KEY (api_key) REFERENCES api_keys(key)
             );
 
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (api_key) REFERENCES api_keys(key)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_usage_key ON usage(api_key);
-            CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage(timestamp);"
+            CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_key ON checkpoints(api_key);"
         )?;
         Ok(())
     }
@@ -105,6 +116,75 @@ impl Database {
             })
         }).unwrap().filter_map(|r| r.ok()).collect()
     }
+
+    // ── Checkpoint CRUD ──────────────────────────────────────────────────────
+
+    pub fn create_checkpoint_record(
+        &self,
+        id: &str,
+        api_key: &str,
+        name: &str,
+        path: &str,
+        size_bytes: i64,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO checkpoints (id, api_key, name, path, created_at, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, api_key, name, path, Utc::now().to_rfc3339(), size_bytes],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_checkpoints(&self, api_key: &str) -> Vec<CheckpointInfo> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, api_key, name, path, created_at, size_bytes FROM checkpoints WHERE api_key = ?1 ORDER BY created_at DESC",
+            )
+            .unwrap();
+        stmt.query_map(params![api_key], |row| {
+            Ok(CheckpointInfo {
+                id: row.get(0)?,
+                api_key: row.get(1)?,
+                name: row.get(2)?,
+                path: row.get(3)?,
+                created_at: row.get(4)?,
+                size_bytes: row.get(5)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
+    }
+
+    pub fn get_checkpoint(&self, id: &str, api_key: &str) -> Option<CheckpointInfo> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, api_key, name, path, created_at, size_bytes FROM checkpoints WHERE id = ?1 AND api_key = ?2",
+            params![id, api_key],
+            |row| {
+                Ok(CheckpointInfo {
+                    id: row.get(0)?,
+                    api_key: row.get(1)?,
+                    name: row.get(2)?,
+                    path: row.get(3)?,
+                    created_at: row.get(4)?,
+                    size_bytes: row.get(5)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn delete_checkpoint_record(&self, id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM checkpoints WHERE id = ?1 AND api_key = ?2",
+            params![id, api_key],
+        )
+        .map(|rows| rows > 0)
+        .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -113,4 +193,14 @@ pub struct ApiKeyInfo {
     pub name: String,
     pub tier: String,
     pub is_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CheckpointInfo {
+    pub id: String,
+    pub api_key: String,
+    pub name: String,
+    pub path: String,
+    pub created_at: String,
+    pub size_bytes: i64,
 }

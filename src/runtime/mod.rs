@@ -24,6 +24,8 @@ struct WorkerCommand {
     code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 pub struct PythonRuntime {
@@ -90,6 +92,7 @@ impl PythonRuntime {
             cmd_type: "execute".to_string(),
             code: Some(code.to_string()),
             stream: Some(false),
+            path: None,
         };
 
         let mut cmd_json =
@@ -211,6 +214,7 @@ impl PythonRuntime {
             cmd_type: "execute".to_string(),
             code: Some(code.to_string()),
             stream: Some(true),
+            path: None,
         };
 
         let mut cmd_json = serde_json::to_string(&cmd)
@@ -328,6 +332,7 @@ impl PythonRuntime {
             cmd_type: "clear".to_string(),
             code: None,
             stream: None,
+            path: None,
         };
         let mut cmd_json = serde_json::to_string(&cmd).unwrap_or_else(|_| r#"{"type":"clear"}"#.to_string());
         cmd_json.push('\n');
@@ -336,6 +341,81 @@ impl PythonRuntime {
             let _ = self.stdin.flush().await;
             let mut line = String::new();
             let _ = timeout(Duration::from_secs(5), self.reader.read_line(&mut line)).await;
+        }
+    }
+
+    /// Serialize session globals to disk. Returns (size_bytes, error).
+    pub async fn create_checkpoint(&mut self, path: &str) -> (u64, Option<String>) {
+        let cmd = WorkerCommand {
+            cmd_type: "checkpoint".to_string(),
+            code: None,
+            stream: None,
+            path: Some(path.to_string()),
+        };
+
+        let mut cmd_json = serde_json::to_string(&cmd)
+            .unwrap_or_else(|_| r#"{"type":"checkpoint","path":""}"#.to_string());
+        cmd_json.push('\n');
+
+        if self.stdin.write_all(cmd_json.as_bytes()).await.is_err()
+            || self.stdin.flush().await.is_err()
+        {
+            return (0, Some("Failed to send checkpoint command".into()));
+        }
+
+        let mut line = String::new();
+        match timeout(Duration::from_secs(30), self.reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    let size = msg.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let error = msg.get("error").and_then(|v| {
+                        if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }
+                    });
+                    (size, error)
+                } else {
+                    (0, Some("Invalid response from worker".into()))
+                }
+            }
+            _ => (0, Some("Checkpoint timed out or worker died".into())),
+        }
+    }
+
+    /// Deserialize session globals from disk and merge into worker state. Returns (vars, error).
+    pub async fn restore_checkpoint(&mut self, path: &str) -> (Vec<String>, Option<String>) {
+        let cmd = WorkerCommand {
+            cmd_type: "restore".to_string(),
+            code: None,
+            stream: None,
+            path: Some(path.to_string()),
+        };
+
+        let mut cmd_json = serde_json::to_string(&cmd)
+            .unwrap_or_else(|_| r#"{"type":"restore","path":""}"#.to_string());
+        cmd_json.push('\n');
+
+        if self.stdin.write_all(cmd_json.as_bytes()).await.is_err()
+            || self.stdin.flush().await.is_err()
+        {
+            return (vec![], Some("Failed to send restore command".into()));
+        }
+
+        let mut line = String::new();
+        match timeout(Duration::from_secs(30), self.reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    let vars = msg.get("vars")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default();
+                    let error = msg.get("error").and_then(|v| {
+                        if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }
+                    });
+                    (vars, error)
+                } else {
+                    (vec![], Some("Invalid response from worker".into()))
+                }
+            }
+            _ => (vec![], Some("Restore timed out or worker died".into())),
         }
     }
 
