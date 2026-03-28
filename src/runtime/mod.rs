@@ -75,6 +75,9 @@ fn spawn_jailed(
     cmd
         .args(["--mode", "o"])
         .args(["--log", "/dev/null"])
+        // Use host root FS as jail root (writable for .pyc cache files)
+        .args(["--chroot", "/"])
+        .arg("--rw")
         // Hide /proc — workers can't enumerate PIDs or read system info
         .arg("--disable_proc")
         // Resource limits
