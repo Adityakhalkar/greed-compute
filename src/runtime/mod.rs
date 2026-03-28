@@ -68,39 +68,30 @@ fn spawn_jailed(
 ) -> Result<tokio::process::Child, String> {
     let workspace_str = workspace.to_string_lossy().to_string();
 
-    // Each session gets its own network namespace (no network access),
-    // hidden /proc (can't enumerate other processes), and kernel-enforced
-    // resource limits. Falls back to spawn_direct if nsjail isn't installed.
+    // nsjail 3.4: network isolation is ON by default (CLONE_NEWNET).
+    // No chroot needed — Python-level import hooks handle filesystem access.
+    // We get: isolated network namespace, hidden /proc, kernel resource limits.
     let mut cmd = Command::new("nsjail");
     cmd
-        // Run once (fork+exec into jail), pass stdin/stdout through
         .args(["--mode", "o"])
         .args(["--log", "/dev/null"])
-        // New network namespace — zero network access at OS level
-        .arg("--clone_newnet")
-        // Hide /proc — workers can't see other PIDs or system info
+        // Hide /proc — workers can't enumerate PIDs or read system info
         .arg("--disable_proc")
         // Resource limits
         .args(["--max_cpus", "1"])
+        .args(["--rlimit_as", "1024"])       // 1 GB virtual memory
         .args(["--rlimit_nofile", "128"])
         .args(["--rlimit_nproc", "64"])
-        // 1 GB virtual address space (rlimit_as is in MB for nsjail)
-        .args(["--rlimit_as", "1024"])
-        // No time limit here — sessions are TTL-managed by Rust
+        .args(["--rlimit_fsize", "inf"])     // allow writing .pyc cache files
+        .args(["--rlimit_cpu", "inf"])       // session TTL manages lifetime
         .args(["--time_limit", "0"])
-        // Use host root FS (simplest; no need to replicate venv paths)
-        .args(["--chroot", "/"])
-        // Session workspace is writable; everything else is inherited read-only
-        .args(["--bindmount", &format!("{}:/workspace", workspace_str)])
-        .args(["--cwd", "/workspace"])
-        // Pass required env vars explicitly (nsjail doesn't inherit parent env)
+        // Pass required env vars explicitly (nsjail clears parent env)
         .args(["--env", "GREED_PRELOAD=1"])
         .args(["--env", "GREED_MAX_MEMORY_MB=512"])
         .args(["--env", "GREED_MAX_CPU_SECONDS=30"])
-        .args(["--env", &format!("GREED_WORKSPACE=/workspace")])
+        .args(["--env", &format!("GREED_WORKSPACE={}", workspace_str)])
         .args(["--env", "PYTHONDONTWRITEBYTECODE=1"])
-        .args(["--env", "HOME=/workspace"])
-        // Separator then the actual command
+        .args(["--env", &format!("HOME={}", workspace_str)])
         .arg("--")
         .arg(python_path)
         .arg(worker_path)
