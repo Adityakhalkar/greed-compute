@@ -10,7 +10,7 @@ use crate::runtime::PythonRuntime;
 
 const DEFAULT_TTL_SECS: i64 = 900; // 15 minutes — dedicated VPS, suits notebook workflows
 const SWEEPER_INTERVAL_SECS: u64 = 30;
-const WARM_POOL_SIZE: usize = 2;
+const WARM_POOL_SIZE: usize = 3;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInfo {
