@@ -34,24 +34,96 @@ pub struct PythonRuntime {
     reader: BufReader<tokio::process::ChildStdout>,
 }
 
+fn nsjail_available() -> bool {
+    std::process::Command::new("which")
+        .arg("nsjail")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn spawn_direct(
+    workspace: &PathBuf,
+    worker_path: &str,
+    python_path: &str,
+) -> Result<tokio::process::Child, String> {
+    Command::new(python_path)
+        .arg(worker_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .env("GREED_WORKSPACE", workspace.to_string_lossy().as_ref())
+        .env("GREED_MAX_MEMORY_MB", "512")
+        .env("GREED_MAX_CPU_SECONDS", "30")
+        .env("GREED_PRELOAD", "1")
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn Python worker: {}", e))
+}
+
+fn spawn_jailed(
+    workspace: &PathBuf,
+    worker_path: &str,
+    python_path: &str,
+) -> Result<tokio::process::Child, String> {
+    let workspace_str = workspace.to_string_lossy().to_string();
+
+    // Each session gets its own network namespace (no network access),
+    // hidden /proc (can't enumerate other processes), and kernel-enforced
+    // resource limits. Falls back to spawn_direct if nsjail isn't installed.
+    let mut cmd = Command::new("nsjail");
+    cmd
+        // Run once (fork+exec into jail), pass stdin/stdout through
+        .args(["--mode", "o"])
+        .args(["--log", "/dev/null"])
+        // New network namespace — zero network access at OS level
+        .arg("--clone_newnet")
+        // Hide /proc — workers can't see other PIDs or system info
+        .arg("--disable_proc")
+        // Resource limits
+        .args(["--max_cpus", "1"])
+        .args(["--rlimit_nofile", "128"])
+        .args(["--rlimit_nproc", "64"])
+        // 1 GB virtual address space (rlimit_as is in MB for nsjail)
+        .args(["--rlimit_as", "1024"])
+        // No time limit here — sessions are TTL-managed by Rust
+        .args(["--time_limit", "0"])
+        // Use host root FS (simplest; no need to replicate venv paths)
+        .args(["--chroot", "/"])
+        // Session workspace is writable; everything else is inherited read-only
+        .args(["--bindmount", &format!("{}:/workspace", workspace_str)])
+        .args(["--cwd", "/workspace"])
+        // Pass required env vars explicitly (nsjail doesn't inherit parent env)
+        .args(["--env", "GREED_PRELOAD=1"])
+        .args(["--env", "GREED_MAX_MEMORY_MB=512"])
+        .args(["--env", "GREED_MAX_CPU_SECONDS=30"])
+        .args(["--env", &format!("GREED_WORKSPACE=/workspace")])
+        .args(["--env", "PYTHONDONTWRITEBYTECODE=1"])
+        .args(["--env", "HOME=/workspace"])
+        // Separator then the actual command
+        .arg("--")
+        .arg(python_path)
+        .arg(worker_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+
+    tracing::info!("Spawning worker under nsjail");
+    cmd.spawn().map_err(|e| format!("Failed to spawn jailed Python worker: {}", e))
+}
+
 impl PythonRuntime {
     pub async fn spawn(
         workspace: &PathBuf,
         worker_path: &str,
         python_path: &str,
     ) -> Result<Self, String> {
-        let mut child = Command::new(python_path)
-            .arg(worker_path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .env("GREED_WORKSPACE", workspace.to_string_lossy().as_ref())
-            .env("GREED_MAX_MEMORY_MB", "512")
-            .env("GREED_MAX_CPU_SECONDS", "30")
-            .env("GREED_PRELOAD", "1")
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("Failed to spawn Python worker: {}", e))?;
+        let mut child = if nsjail_available() {
+            spawn_jailed(workspace, worker_path, python_path)?
+        } else {
+            spawn_direct(workspace, worker_path, python_path)?
+        };
 
         let stdin = child.stdin.take().ok_or("Failed to capture worker stdin")?;
         let stdout = child
