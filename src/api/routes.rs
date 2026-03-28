@@ -38,6 +38,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/admin/keys", post(create_api_key))
         .route("/admin/keys", get(list_api_keys))
         .route("/admin/keys/{key}/revoke", post(revoke_api_key))
+        .route("/mcp", post(crate::api::mcp::mcp_handler))
 }
 
 // ── Health ──────────────────────────────────────────────
