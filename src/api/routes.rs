@@ -12,6 +12,11 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 use crate::AppState;
 
+static WEBHOOK_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+fn webhook_client() -> &'static reqwest::Client {
+    WEBHOOK_CLIENT.get_or_init(reqwest::Client::new)
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/health", get(health))
@@ -21,6 +26,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/session/{id}/execute", post(execute_code))
         .route("/session/{id}/execute/stream", post(execute_code_stream))
         .route("/session/{id}/install", post(install_packages))
+        .route("/session/{id}/execute/async", post(execute_code_async))
+        .route("/session/{id}/jobs", get(list_session_jobs))
+        .route("/jobs/{id}", get(get_job))
         .route("/session/{id}/checkpoint", post(create_checkpoint))
         .route("/session/{id}/restore/{checkpoint_id}", post(restore_checkpoint))
         .route("/checkpoints", get(list_checkpoints))
@@ -257,6 +265,96 @@ async fn install_packages(
         "error": error,
         "duration_ms": duration_ms,
     })))
+}
+
+// ── Background Jobs ─────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AsyncExecuteRequest {
+    code: String,
+    webhook_url: Option<String>,
+}
+
+async fn execute_code_async(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<AsyncExecuteRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    state.db.create_job(&job_id, &id, &api_key, &body.code, body.webhook_url.as_deref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Spawn background task — runs code and updates job record when done
+    let state_clone = state.clone();
+    let job_id_clone = job_id.clone();
+    let code = body.code.clone();
+    let webhook_url = body.webhook_url.clone();
+
+    tokio::spawn(async move {
+        state_clone.db.set_job_running(&job_id_clone);
+
+        let mut runtime = session.runtime.lock().await;
+        session.touch();
+        let result = runtime.execute(&code).await;
+        drop(runtime);
+
+        let result_str = result.result.as_deref();
+        let error_str = result.error.as_deref();
+
+        state_clone.db.set_job_done(
+            &job_id_clone,
+            &result.stdout,
+            result_str,
+            error_str,
+            &result.plots,
+            result.html.as_deref(),
+            result.duration_ms as i64,
+        );
+
+        // Fire webhook if provided
+        if let Some(url) = webhook_url {
+            let payload = serde_json::json!({
+                "job_id": job_id_clone,
+                "status": if error_str.is_some() { "error" } else { "done" },
+                "stdout": result.stdout,
+                "result": result.result,
+                "error": result.error,
+                "plots": result.plots,
+                "html": result.html,
+                "duration_ms": result.duration_ms,
+            });
+            let _ = webhook_client().post(&url).json(&payload).send().await;
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id,
+        "status": "queued",
+    })))
+}
+
+async fn get_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let job = state.db.get_job(&id, &api_key).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(serde_json::to_value(job).unwrap()))
+}
+
+async fn list_session_jobs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let jobs = state.db.list_session_jobs(&id, &api_key);
+    Ok(Json(serde_json::json!({ "jobs": jobs })))
 }
 
 // ── Checkpointing ───────────────────────────────────────
