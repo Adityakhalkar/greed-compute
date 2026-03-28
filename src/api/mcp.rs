@@ -177,8 +177,6 @@ async fn dispatch(
     tool: &str,
     args: &Value,
 ) -> Value {
-    let empty = Value::Object(Default::default());
-
     match tool {
         "create_session" => {
             let ttl = args.get("ttl_seconds").and_then(|v| v.as_i64());
