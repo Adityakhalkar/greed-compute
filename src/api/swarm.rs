@@ -289,6 +289,16 @@ async fn run_worker(
         rt.execute(&full_code).await
     };
 
+    // Auto-capture `result` variable if map_fn used assignment instead of expression.
+    // e.g. `result = np.mean(partition)` won't populate result field — capture it here.
+    let captured_result = if result.result.is_none() && result.error.is_none() {
+        let mut rt = session.runtime.lock().await;
+        let capture = rt.execute("result").await;
+        if capture.error.is_none() { capture.result } else { None }
+    } else {
+        result.result.clone()
+    };
+
     let duration_ms = start.elapsed().as_millis() as i64;
 
     // Get worker index from DB
@@ -301,7 +311,7 @@ async fn run_worker(
     state.db.set_worker_done(
         &worker_id, &swarm_id,
         &result.stdout,
-        result.result.as_deref(),
+        captured_result.as_deref(),
         result.error.as_deref(),
         &result.plots,
         duration_ms,
@@ -311,7 +321,7 @@ async fn run_worker(
 
     let _ = tx.send(WorkerResult {
         worker_index,
-        result: result.result.clone(),
+        result: captured_result,
         stdout: result.stdout.clone(),
         error: result.error.clone(),
     }).await;
