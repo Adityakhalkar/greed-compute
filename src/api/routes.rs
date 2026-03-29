@@ -38,6 +38,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/admin/keys", post(create_api_key))
         .route("/admin/keys", get(list_api_keys))
         .route("/admin/keys/{key}/revoke", post(revoke_api_key))
+        .route("/swarm", post(crate::api::swarm::create_swarm))
+        .route("/swarm/{id}", get(crate::api::swarm::get_swarm))
         .route("/mcp", post(crate::api::mcp::mcp_handler))
 }
 

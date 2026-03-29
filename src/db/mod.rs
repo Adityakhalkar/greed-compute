@@ -65,7 +65,43 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage(timestamp);
             CREATE INDEX IF NOT EXISTS idx_checkpoints_key ON checkpoints(api_key);
             CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id);
-            CREATE INDEX IF NOT EXISTS idx_jobs_key ON jobs(api_key);"
+            CREATE INDEX IF NOT EXISTS idx_jobs_key ON jobs(api_key);
+
+            CREATE TABLE IF NOT EXISTS swarms (
+                id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                total_workers INTEGER NOT NULL,
+                completed_workers INTEGER NOT NULL DEFAULT 0,
+                failed_workers INTEGER NOT NULL DEFAULT 0,
+                template_checkpoint_id TEXT,
+                reduce_stdout TEXT,
+                reduce_result TEXT,
+                reduce_error TEXT,
+                webhook_url TEXT,
+                created_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS swarm_workers (
+                id TEXT PRIMARY KEY,
+                swarm_id TEXT NOT NULL,
+                worker_index INTEGER NOT NULL,
+                session_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                partition TEXT NOT NULL,
+                stdout TEXT,
+                result TEXT,
+                error TEXT,
+                plots TEXT,
+                duration_ms INTEGER,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY (swarm_id) REFERENCES swarms(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_swarms_key ON swarms(api_key);
+            CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);"
         )?;
         Ok(())
     }
@@ -267,6 +303,117 @@ impl Database {
         ).ok()
     }
 
+    // ── Swarm CRUD ────────────────────────────────────────────────────────────
+
+    pub fn create_swarm(
+        &self, id: &str, api_key: &str, total: usize,
+        template_checkpoint_id: Option<&str>, webhook_url: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO swarms (id, api_key, total_workers, template_checkpoint_id, webhook_url, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, api_key, total as i64, template_checkpoint_id, webhook_url, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_swarm_worker(
+        &self, id: &str, swarm_id: &str, index: usize, partition_json: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO swarm_workers (id, swarm_id, worker_index, partition) VALUES (?1, ?2, ?3, ?4)",
+            params![id, swarm_id, index as i64, partition_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_worker_running(&self, id: &str, session_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE swarm_workers SET status='running', session_id=?1, started_at=?2 WHERE id=?3",
+            params![session_id, Utc::now().to_rfc3339(), id],
+        );
+    }
+
+    pub fn set_worker_done(
+        &self, id: &str, swarm_id: &str,
+        stdout: &str, result: Option<&str>, error: Option<&str>,
+        plots: &[String], duration_ms: i64,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let status = if error.is_some() { "error" } else { "done" };
+        let plots_json = serde_json::to_string(plots).unwrap_or_else(|_| "[]".into());
+        let _ = conn.execute(
+            "UPDATE swarm_workers SET status=?1, stdout=?2, result=?3, error=?4,
+             plots=?5, duration_ms=?6, finished_at=?7 WHERE id=?8",
+            params![status, stdout, result, error, plots_json, duration_ms, Utc::now().to_rfc3339(), id],
+        );
+        if error.is_some() {
+            let _ = conn.execute(
+                "UPDATE swarms SET failed_workers = failed_workers + 1 WHERE id=?1", params![swarm_id],
+            );
+        } else {
+            let _ = conn.execute(
+                "UPDATE swarms SET completed_workers = completed_workers + 1 WHERE id=?1", params![swarm_id],
+            );
+        }
+    }
+
+    pub fn finish_swarm(
+        &self, id: &str,
+        reduce_stdout: Option<&str>, reduce_result: Option<&str>, reduce_error: Option<&str>,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let status = if reduce_error.is_some() { "error" } else { "done" };
+        let _ = conn.execute(
+            "UPDATE swarms SET status=?1, reduce_stdout=?2, reduce_result=?3,
+             reduce_error=?4, finished_at=?5 WHERE id=?6",
+            params![status, reduce_stdout, reduce_result, reduce_error, Utc::now().to_rfc3339(), id],
+        );
+    }
+
+    pub fn get_swarm(&self, id: &str, api_key: &str) -> Option<SwarmRecord> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, api_key, status, total_workers, completed_workers, failed_workers,
+             template_checkpoint_id, reduce_stdout, reduce_result, reduce_error,
+             webhook_url, created_at, finished_at FROM swarms WHERE id=?1 AND api_key=?2",
+            params![id, api_key],
+            |row| Ok(SwarmRecord {
+                id: row.get(0)?, api_key: row.get(1)?, status: row.get(2)?,
+                total_workers: row.get(3)?, completed_workers: row.get(4)?,
+                failed_workers: row.get(5)?, template_checkpoint_id: row.get(6)?,
+                reduce_stdout: row.get(7)?, reduce_result: row.get(8)?,
+                reduce_error: row.get(9)?, webhook_url: row.get(10)?,
+                created_at: row.get(11)?, finished_at: row.get(12)?,
+            }),
+        ).ok()
+    }
+
+    pub fn get_swarm_workers(&self, swarm_id: &str) -> Vec<SwarmWorkerRecord> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, swarm_id, worker_index, session_id, status, partition,
+             stdout, result, error, plots, duration_ms, started_at, finished_at
+             FROM swarm_workers WHERE swarm_id=?1 ORDER BY worker_index",
+        ).unwrap();
+        stmt.query_map(params![swarm_id], |row| {
+            let plots_json: Option<String> = row.get(9)?;
+            let plots = plots_json.as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .unwrap_or_default();
+            Ok(SwarmWorkerRecord {
+                id: row.get(0)?, swarm_id: row.get(1)?, worker_index: row.get(2)?,
+                session_id: row.get(3)?, status: row.get(4)?, partition: row.get(5)?,
+                stdout: row.get(6)?, result: row.get(7)?, error: row.get(8)?,
+                plots, duration_ms: row.get(10)?, started_at: row.get(11)?,
+                finished_at: row.get(12)?,
+            })
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
     pub fn list_session_jobs(&self, session_id: &str, api_key: &str) -> Vec<JobRecord> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -331,6 +478,40 @@ pub struct JobRecord {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SwarmRecord {
+    pub id: String,
+    pub api_key: String,
+    pub status: String,
+    pub total_workers: i64,
+    pub completed_workers: i64,
+    pub failed_workers: i64,
+    pub template_checkpoint_id: Option<String>,
+    pub reduce_stdout: Option<String>,
+    pub reduce_result: Option<String>,
+    pub reduce_error: Option<String>,
+    pub webhook_url: Option<String>,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SwarmWorkerRecord {
+    pub id: String,
+    pub swarm_id: String,
+    pub worker_index: i64,
+    pub session_id: Option<String>,
+    pub status: String,
+    pub partition: String,
+    pub stdout: Option<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub plots: Vec<String>,
+    pub duration_ms: Option<i64>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
