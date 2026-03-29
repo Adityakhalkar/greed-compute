@@ -275,13 +275,14 @@ async fn run_worker(
         }
     }
 
-    // Inject partition as variable, then run map_fn
+    // Inject partition, run map_fn, then evaluate `result` as last expression
+    // so our Jupyter-style capture picks it up automatically.
     let partition_json = serde_json::to_string(&partition).unwrap_or_else(|_| "null".into());
     let inject = format!(
         "import json as _json\npartition = _json.loads('{}')\ndel _json",
         partition_json.replace('\'', "\\'")
     );
-    let full_code = format!("{}\n{}", inject, map_fn);
+    let full_code = format!("{}\n{}\nresult", inject, map_fn);
 
     let result = {
         let mut rt = session.runtime.lock().await;
@@ -289,15 +290,7 @@ async fn run_worker(
         rt.execute(&full_code).await
     };
 
-    // Auto-capture `result` variable if map_fn used assignment instead of expression.
-    // e.g. `result = np.mean(partition)` won't populate result field — capture it here.
-    let captured_result = if result.result.is_none() && result.error.is_none() {
-        let mut rt = session.runtime.lock().await;
-        let capture = rt.execute("result").await;
-        if capture.error.is_none() { capture.result } else { None }
-    } else {
-        result.result.clone()
-    };
+    let captured_result = result.result.clone();
 
     let duration_ms = start.elapsed().as_millis() as i64;
 
