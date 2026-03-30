@@ -29,6 +29,8 @@ pub struct Session {
     calls_used: AtomicU64,
     pub runtime: Arc<Mutex<PythonRuntime>>,
     pub workspace: PathBuf,
+    /// API key that owns this session — used for grace checkpointing on expiry.
+    pub api_key: Option<String>,
 }
 
 impl Session {
@@ -118,7 +120,15 @@ impl SessionManager {
         PythonRuntime::spawn(workspace, &self.worker_path, &self.python_path).await
     }
 
+    pub async fn create_session_for_key(&self, ttl_secs: Option<i64>, api_key: Option<String>) -> Result<SessionInfo, String> {
+        self.create_session_inner(ttl_secs, api_key).await
+    }
+
     pub async fn create_session(&self, ttl_secs: Option<i64>) -> Result<SessionInfo, String> {
+        self.create_session_inner(ttl_secs, None).await
+    }
+
+    async fn create_session_inner(&self, ttl_secs: Option<i64>, api_key: Option<String>) -> Result<SessionInfo, String> {
         let session_id = Uuid::new_v4().to_string();
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
         let now = Utc::now();
@@ -146,6 +156,7 @@ impl SessionManager {
             calls_used: AtomicU64::new(0),
             runtime: Arc::new(Mutex::new(runtime)),
             workspace,
+            api_key,
         });
 
         self.sessions.insert(session_id, session);
@@ -187,33 +198,26 @@ impl SessionManager {
         self.warm_pool.lock().await.len()
     }
 
-    /// Background sweeper: kills expired sessions + refills warm pool
+    /// Drain expired sessions from the map and return them.
+    /// Caller is responsible for grace-checkpointing before dropping.
+    pub fn drain_expired(&self) -> Vec<(String, Arc<Session>)> {
+        let now = Utc::now();
+        let expired_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.value().expires_at() < now)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        expired_ids.into_iter()
+            .filter_map(|id| self.sessions.remove(&id).map(|(k, v)| (k, v)))
+            .collect()
+    }
+
+    /// Background sweeper: refills warm pool (expiry is handled by grace-checkpoint task)
     pub async fn run_sweeper(&self) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(SWEEPER_INTERVAL_SECS)).await;
-
-            // Sweep expired sessions
-            let now = Utc::now();
-            let expired: Vec<String> = self
-                .sessions
-                .iter()
-                .filter(|entry| entry.value().expires_at() < now)
-                .map(|entry| entry.key().clone())
-                .collect();
-
-            for session_id in &expired {
-                self.terminate_session(session_id);
-            }
-
-            if !expired.is_empty() {
-                tracing::info!(
-                    count = expired.len(),
-                    remaining = self.sessions.len(),
-                    "Swept expired sessions"
-                );
-            }
-
-            // Refill warm pool periodically
             let pool_size = self.warm_pool.lock().await.len();
             if pool_size < WARM_POOL_SIZE {
                 self.fill_warm_pool().await;

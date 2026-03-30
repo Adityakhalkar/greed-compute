@@ -291,6 +291,9 @@ pub async fn get_usage(
             },
             "total_compute_ms": usage.total_duration_ms,
             "total_compute_mins": usage.total_duration_ms / 60_000,
+            "checkpoint_storage_used_mb": state.db.checkpoint_storage_used(&api_key) / (1024 * 1024),
+            "checkpoint_storage_limit_mb": if limits.checkpoint_storage_bytes == u64::MAX { serde_json::Value::Null } else { json!(limits.checkpoint_storage_bytes / (1024 * 1024)) },
+            "checkpoint_retention_days": limits.checkpoint_retention_days,
         },
         "limits": {
             "requests_per_minute": limits.requests_per_minute,

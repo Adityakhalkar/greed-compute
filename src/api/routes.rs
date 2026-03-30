@@ -76,7 +76,8 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let session = match state.sessions.create_session(body.ttl_seconds).await {
+    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let session = match state.sessions.create_session_for_key(body.ttl_seconds, api_key).await {
         Ok(info) => info,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create session");
@@ -405,8 +406,27 @@ async fn create_checkpoint(
     headers: HeaderMap,
     Json(body): Json<CreateCheckpointRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    use crate::billing::PlanLimits;
+
     let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // ── Storage quota check ───────────────────────────────────────────────────
+    let key_info = state.db.validate_api_key(&api_key).ok_or(StatusCode::UNAUTHORIZED)?;
+    let limits = PlanLimits::for_tier(&key_info.tier);
+    let used = state.db.checkpoint_storage_used(&api_key);
+    if used >= limits.checkpoint_storage_bytes {
+        let used_mb = used / (1024 * 1024);
+        let limit_mb = limits.checkpoint_storage_bytes / (1024 * 1024);
+        return Ok(Json(serde_json::json!({
+            "error": "Checkpoint storage quota exceeded",
+            "used_mb": used_mb,
+            "limit_mb": limit_mb,
+            "plan": key_info.tier,
+            "fix": "Delete old checkpoints or upgrade your plan",
+            "upgrade": "https://compute.deep-ml.com/billing"
+        })));
+    }
 
     let checkpoint_id = uuid::Uuid::new_v4().to_string();
     let name = body.name.unwrap_or_else(|| format!("checkpoint-{}", &checkpoint_id[..8]));
@@ -426,10 +446,14 @@ async fn create_checkpoint(
     state.db.create_checkpoint_record(&checkpoint_id, &api_key, &name, &path_str, size_bytes as i64)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let retention_days = limits.checkpoint_retention_days;
     Ok(Json(serde_json::json!({
         "checkpoint_id": checkpoint_id,
         "name": name,
         "size_bytes": size_bytes,
+        "expires_in_days": retention_days,
+        "storage_used_mb": (used + size_bytes) / (1024 * 1024),
+        "storage_limit_mb": limits.checkpoint_storage_bytes / (1024 * 1024),
     })))
 }
 

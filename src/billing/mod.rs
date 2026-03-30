@@ -12,8 +12,12 @@ pub struct PlanLimits {
     pub swarms_per_day: u32,
     /// Max concurrent sessions allowed at once
     pub concurrent_sessions: u32,
-    /// Max single execution wall time in seconds (0 = use worker default)
+    /// Max single execution wall time in seconds
     pub max_execution_secs: u32,
+    /// Max total checkpoint storage in bytes (u64::MAX = unlimited)
+    pub checkpoint_storage_bytes: u64,
+    /// How many days before a checkpoint is auto-deleted (0 = never)
+    pub checkpoint_retention_days: u32,
 }
 
 impl PlanLimits {
@@ -25,6 +29,8 @@ impl PlanLimits {
                 swarms_per_day: 100,
                 concurrent_sessions: 20,
                 max_execution_secs: 120,
+                checkpoint_storage_bytes: 5 * 1024 * 1024 * 1024,  // 5 GB
+                checkpoint_retention_days: 30,
             },
             "enterprise" => Self {
                 requests_per_minute: 2_000,
@@ -32,6 +38,8 @@ impl PlanLimits {
                 swarms_per_day: u32::MAX,
                 concurrent_sessions: 100,
                 max_execution_secs: 600,
+                checkpoint_storage_bytes: 50 * 1024 * 1024 * 1024, // 50 GB
+                checkpoint_retention_days: 90,
             },
             // free / unknown
             _ => Self {
@@ -40,6 +48,8 @@ impl PlanLimits {
                 swarms_per_day: 5,
                 concurrent_sessions: 3,
                 max_execution_secs: 30,
+                checkpoint_storage_bytes: 500 * 1024 * 1024,        // 500 MB
+                checkpoint_retention_days: 7,
             },
         }
     }
