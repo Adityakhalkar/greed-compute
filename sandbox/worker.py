@@ -397,6 +397,13 @@ def handle_execute(code, session_globals, streaming=False):
                     else:
                         eval_result_repr = repr(result)
                         print(eval_result_repr)
+                        # Overwrite with JSON-serialized form so structured values
+                        # (numbers, lists, dicts) round-trip correctly through the
+                        # reduce pipeline. Fall back to repr for non-serializable types.
+                        try:
+                            eval_result_repr = json.dumps(result, default=repr)
+                        except Exception:
+                            pass  # keep repr
 
             # Capture any figures that were created but show() wasn't called
             if _preloaded_plt is not None and _preloaded_plt.get_fignums():

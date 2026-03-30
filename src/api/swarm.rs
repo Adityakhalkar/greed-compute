@@ -368,10 +368,15 @@ async fn run_streaming_reduce(
         completed += 1;
         completion_times.push(completed as f64);
 
-        // Feed this result into the reducer immediately (streaming)
+        // Feed this result into the reducer immediately (streaming).
+        // Parse worker.result from its JSON-serialized form back into a typed
+        // Value so numbers/lists/dicts flow into the reduce_fn correctly.
+        let result_value: Value = worker.result.as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
         let result_json = serde_json::to_string(&json!({
             "worker_index": worker.worker_index,
-            "result": worker.result,
+            "result": result_value,
             "stdout": worker.stdout,
             "error": worker.error,
         })).unwrap_or_else(|_| "{}".into());
