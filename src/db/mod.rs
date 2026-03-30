@@ -135,27 +135,17 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
 
-            -- Additive migrations: add columns if they don't exist yet
-            -- (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
-            CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_key ON usage_events(api_key);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_daily_usage_key ON daily_usage(api_key);
             "
         )?;
 
-        // Additive column migrations — safe to run repeatedly
-        let conn2 = self.conn.lock().unwrap();
-        let _ = conn2.execute_batch("
-            ALTER TABLE api_keys ADD COLUMN stripe_customer_id TEXT;
-        ");
-        let _ = conn2.execute_batch("
-            ALTER TABLE api_keys ADD COLUMN stripe_subscription_id TEXT;
-        ");
+        // Additive column migrations — ALTER TABLE errors are silently ignored
+        // because the column may already exist from a previous migration run.
+        let _ = conn.execute_batch("ALTER TABLE api_keys ADD COLUMN stripe_customer_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE api_keys ADD COLUMN stripe_subscription_id TEXT;");
 
-        let conn3 = self.conn.lock().unwrap();
-        conn3.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_usage_events_key ON usage_events(api_key);
-             CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at);
-             CREATE INDEX IF NOT EXISTS idx_daily_usage_key ON daily_usage(api_key);"
-        )?;
         Ok(())
     }
 
