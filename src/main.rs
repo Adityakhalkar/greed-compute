@@ -1,10 +1,12 @@
 mod api;
+mod billing;
 mod db;
 mod runtime;
 mod sandbox;
 
 use axum::{middleware, Router};
-use std::sync::Arc;
+use dashmap::DashMap;
+use std::{collections::VecDeque, sync::Arc, time::Instant};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -15,6 +17,8 @@ use crate::sandbox::SessionManager;
 pub struct AppState {
     pub sessions: SessionManager,
     pub db: Database,
+    /// Sliding window rate limiter: api_key → timestamps of recent requests (last 60s)
+    pub rate_windows: DashMap<String, VecDeque<Instant>>,
 }
 
 #[tokio::main]
@@ -63,7 +67,7 @@ async fn main() {
         sweep_sessions.run_sweeper().await;
     });
 
-    let state = Arc::new(AppState { sessions, db });
+    let state = Arc::new(AppState { sessions, db, rate_windows: DashMap::new() });
 
     let app = Router::new()
         .nest("/v1", api::routes::router())
