@@ -357,6 +357,7 @@ def handle_execute(code, session_globals, streaming=False):
     start = time.monotonic()
     error = None
     html = None
+    eval_result_repr = None
     plot_store = []
 
     body_code, expr_code = _split_last_expr(code)
@@ -394,7 +395,8 @@ def handle_execute(code, session_globals, streaming=False):
                     ):
                         html = result.to_html()
                     else:
-                        print(repr(result))
+                        eval_result_repr = repr(result)
+                        print(eval_result_repr)
 
             # Capture any figures that were created but show() wasn't called
             if _preloaded_plt is not None and _preloaded_plt.get_fignums():
@@ -416,6 +418,7 @@ def handle_execute(code, session_globals, streaming=False):
     emit({
         "type": "result",
         "stdout": captured.getvalue(),
+        "result": eval_result_repr,
         "error": error,
         "duration_ms": duration_ms,
         "plots": plot_store,

@@ -20,6 +20,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Instant};
@@ -275,13 +276,14 @@ async fn run_worker(
         }
     }
 
-    // Inject partition, run map_fn, then evaluate `result` as last expression
-    // so our Jupyter-style capture picks it up automatically.
+    // Inject partition via base64 — safe against any characters in the JSON.
     let partition_json = serde_json::to_string(&partition).unwrap_or_else(|_| "null".into());
+    let partition_b64 = BASE64.encode(partition_json.as_bytes());
     let inject = format!(
-        "import json as _json\npartition = _json.loads('{}')\ndel _json",
-        partition_json.replace('\'', "\\'")
+        "import json as _json, base64 as _b64\npartition = _json.loads(_b64.b64decode('{}'))\ndel _json, _b64",
+        partition_b64
     );
+    // Append `result` as the last expression so the Jupyter-style repr capture fires.
     let full_code = format!("{}\n{}\nresult", inject, map_fn);
 
     let result = {
@@ -290,7 +292,12 @@ async fn run_worker(
         rt.execute(&full_code).await
     };
 
-    let captured_result = result.result.clone();
+    // result.result is populated from worker's eval repr.
+    // Fall back to trimmed stdout if the field is absent (e.g. older worker).
+    let captured_result = result.result.clone().or_else(|| {
+        let s = result.stdout.trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    });
 
     let duration_ms = start.elapsed().as_millis() as i64;
 
@@ -369,10 +376,11 @@ async fn run_streaming_reduce(
             "error": worker.error,
         })).unwrap_or_else(|_| "{}".into());
 
+        // Use base64 to safely inject the result JSON — no escaping issues.
+        let result_b64 = BASE64.encode(result_json.as_bytes());
         let feed_code = format!(
-            "import json as _j\nresults.append(_j.loads('{}'))\ndel _j\n{}",
-            result_json.replace('\'', "\\'"),
-            reduce_fn
+            "import json as _j, base64 as _b64\nresults.append(_j.loads(_b64.b64decode('{}')))\ndel _j, _b64\n{}",
+            result_b64, reduce_fn
         );
 
         let reduce_result = {
