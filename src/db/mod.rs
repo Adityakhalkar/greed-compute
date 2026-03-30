@@ -101,7 +101,60 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_swarms_key ON swarms(api_key);
-            CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);"
+            CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);
+
+            -- Enterprise: detailed per-event usage tracking
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                session_id TEXT,
+                swarm_id TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Enterprise: daily aggregated counters (fast limit checks)
+            CREATE TABLE IF NOT EXISTS daily_usage (
+                api_key TEXT NOT NULL,
+                date TEXT NOT NULL,
+                exec_count INTEGER NOT NULL DEFAULT 0,
+                total_duration_ms INTEGER NOT NULL DEFAULT 0,
+                swarm_count INTEGER NOT NULL DEFAULT 0,
+                install_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (api_key, date)
+            );
+
+            -- Enterprise: Stripe customer mapping
+            CREATE TABLE IF NOT EXISTS stripe_customers (
+                api_key TEXT PRIMARY KEY,
+                stripe_customer_id TEXT NOT NULL,
+                stripe_subscription_id TEXT,
+                plan TEXT NOT NULL DEFAULT 'free',
+                status TEXT NOT NULL DEFAULT 'active',
+                updated_at TEXT NOT NULL
+            );
+
+            -- Additive migrations: add columns if they don't exist yet
+            -- (SQLite doesn't support IF NOT EXISTS for ALTER TABLE)
+            CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY);
+            "
+        )?;
+
+        // Additive column migrations — safe to run repeatedly
+        let conn2 = self.conn.lock().unwrap();
+        let _ = conn2.execute_batch("
+            ALTER TABLE api_keys ADD COLUMN stripe_customer_id TEXT;
+        ");
+        let _ = conn2.execute_batch("
+            ALTER TABLE api_keys ADD COLUMN stripe_subscription_id TEXT;
+        ");
+
+        let conn3 = self.conn.lock().unwrap();
+        conn3.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_key ON usage_events(api_key);
+             CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at);
+             CREATE INDEX IF NOT EXISTS idx_daily_usage_key ON daily_usage(api_key);"
         )?;
         Ok(())
     }
@@ -128,6 +181,119 @@ impl Database {
             "INSERT INTO usage (api_key, endpoint, duration_ms, timestamp) VALUES (?1, ?2, ?3, ?4)",
             params![api_key, endpoint, duration_ms, Utc::now().to_rfc3339()],
         );
+    }
+
+    // ── Enterprise: usage events ─────────────────────────────────────────────
+
+    pub fn record_usage_event(
+        &self,
+        api_key: &str,
+        event_type: &str,
+        session_id: Option<&str>,
+        swarm_id: Option<&str>,
+        duration_ms: i64,
+    ) {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO usage_events (api_key, event_type, session_id, swarm_id, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![api_key, event_type, session_id, swarm_id, duration_ms],
+        );
+        // Upsert daily aggregation
+        let _ = conn.execute(
+            "INSERT INTO daily_usage (api_key, date, exec_count, total_duration_ms, swarm_count, install_count)
+             VALUES (?1, ?2,
+                 CASE WHEN ?3 IN ('execute','stream_execute','async_execute') THEN 1 ELSE 0 END,
+                 ?4,
+                 CASE WHEN ?3 = 'swarm' THEN 1 ELSE 0 END,
+                 CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END
+             )
+             ON CONFLICT(api_key, date) DO UPDATE SET
+                 exec_count = exec_count + CASE WHEN ?3 IN ('execute','stream_execute','async_execute') THEN 1 ELSE 0 END,
+                 total_duration_ms = total_duration_ms + ?4,
+                 swarm_count = swarm_count + CASE WHEN ?3 = 'swarm' THEN 1 ELSE 0 END,
+                 install_count = install_count + CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END",
+            params![api_key, today, event_type, duration_ms],
+        );
+    }
+
+    pub fn get_daily_usage(&self, api_key: &str, date: &str) -> DailyUsage {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT exec_count, total_duration_ms, swarm_count, install_count
+             FROM daily_usage WHERE api_key = ?1 AND date = ?2",
+            params![api_key, date],
+            |row| Ok(DailyUsage {
+                exec_count: row.get(0)?,
+                total_duration_ms: row.get(1)?,
+                swarm_count: row.get(2)?,
+                install_count: row.get(3)?,
+            }),
+        ).unwrap_or_default()
+    }
+
+    // ── Enterprise: Stripe ───────────────────────────────────────────────────
+
+    pub fn upsert_stripe_customer(
+        &self,
+        api_key: &str,
+        stripe_customer_id: &str,
+        stripe_subscription_id: Option<&str>,
+        plan: &str,
+        status: &str,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO stripe_customers (api_key, stripe_customer_id, stripe_subscription_id, plan, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(api_key) DO UPDATE SET
+                 stripe_customer_id = ?2,
+                 stripe_subscription_id = ?3,
+                 plan = ?4,
+                 status = ?5,
+                 updated_at = datetime('now')",
+            params![api_key, stripe_customer_id, stripe_subscription_id, plan, status],
+        );
+        // Also upgrade the api_key tier
+        let _ = conn.execute(
+            "UPDATE api_keys SET tier = ?1 WHERE key = ?2",
+            params![plan, api_key],
+        );
+    }
+
+    pub fn get_stripe_customer(&self, api_key: &str) -> Option<StripeCustomer> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT api_key, stripe_customer_id, stripe_subscription_id, plan, status, updated_at
+             FROM stripe_customers WHERE api_key = ?1",
+            params![api_key],
+            |row| Ok(StripeCustomer {
+                api_key: row.get(0)?,
+                stripe_customer_id: row.get(1)?,
+                stripe_subscription_id: row.get(2)?,
+                plan: row.get(3)?,
+                status: row.get(4)?,
+                updated_at: row.get(5)?,
+            }),
+        ).ok()
+    }
+
+    pub fn get_stripe_customer_by_stripe_id(&self, stripe_customer_id: &str) -> Option<StripeCustomer> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT api_key, stripe_customer_id, stripe_subscription_id, plan, status, updated_at
+             FROM stripe_customers WHERE stripe_customer_id = ?1",
+            params![stripe_customer_id],
+            |row| Ok(StripeCustomer {
+                api_key: row.get(0)?,
+                stripe_customer_id: row.get(1)?,
+                stripe_subscription_id: row.get(2)?,
+                plan: row.get(3)?,
+                status: row.get(4)?,
+                updated_at: row.get(5)?,
+            }),
+        ).ok()
     }
 
     pub fn get_usage_count(&self, api_key: &str, since: &str) -> i64 {
@@ -512,6 +678,24 @@ pub struct SwarmWorkerRecord {
     pub duration_ms: Option<i64>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct DailyUsage {
+    pub exec_count: i64,
+    pub total_duration_ms: i64,
+    pub swarm_count: i64,
+    pub install_count: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StripeCustomer {
+    pub api_key: String,
+    pub stripe_customer_id: String,
+    pub stripe_subscription_id: Option<String>,
+    pub plan: String,
+    pub status: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

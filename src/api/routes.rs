@@ -41,6 +41,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/swarm", post(crate::api::swarm::create_swarm))
         .route("/swarm/{id}", get(crate::api::swarm::get_swarm))
         .route("/mcp", post(crate::api::mcp::mcp_handler))
+        // ── Enterprise billing ─────────────────────────────────────────────
+        .route("/billing/checkout", post(crate::api::billing::create_checkout))
+        .route("/billing/portal", post(crate::api::billing::create_portal))
+        .route("/billing/webhook", post(crate::api::billing::stripe_webhook))
+        .route("/usage", get(crate::api::billing::get_usage))
 }
 
 // ── Health ──────────────────────────────────────────────
@@ -181,6 +186,7 @@ struct ExecuteResponse {
 async fn execute_code(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ExecuteRequest>,
 ) -> Result<Json<ExecuteResponse>, StatusCode> {
     let session = state
@@ -196,6 +202,11 @@ async fn execute_code(
     // Renew TTL on every execute — keeps active notebook sessions alive
     session.touch();
 
+    // Record usage event
+    if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        state.db.record_usage_event(key, "execute", Some(&id), None, result.duration_ms as i64);
+    }
+
     Ok(Json(ExecuteResponse {
         stdout: result.stdout,
         result: result.result,
@@ -209,6 +220,7 @@ async fn execute_code(
 async fn execute_code_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ExecuteRequest>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -222,11 +234,18 @@ async fn execute_code_stream(
 
     let session_clone = session.clone();
     let code = body.code.clone();
+    let state_clone = state.clone();
+    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let session_id = id.clone();
 
     tokio::spawn(async move {
         let mut runtime = session_clone.runtime.lock().await;
         let result = runtime.execute_streaming(&code, tx.clone()).await;
         session_clone.touch();
+        // Record usage
+        if let Some(key) = api_key {
+            state_clone.db.record_usage_event(&key, "stream_execute", Some(&session_id), None, result.duration_ms as i64);
+        }
         // Send the final result as the last SSE event
         let final_json = serde_json::json!({
             "type": "result",

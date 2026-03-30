@@ -218,6 +218,10 @@ async fn run_swarm(
 
     // ── Straggler cleanup: sessions are already terminated in run_worker ──────
     state.db.finish_swarm(&swarm_id, reduce_stdout.as_deref(), reduce_result.as_deref(), reduce_error.as_deref());
+    // Record swarm usage event (duration = sum of all worker durations)
+    let workers = state.db.get_swarm_workers(&swarm_id);
+    let total_ms: i64 = workers.iter().filter_map(|w| w.duration_ms).sum();
+    state.db.record_usage_event(&api_key, "swarm", None, Some(&swarm_id), total_ms);
     tracing::info!(swarm_id, "Swarm complete");
 
     // Fire webhook
