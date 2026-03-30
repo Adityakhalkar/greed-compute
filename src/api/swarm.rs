@@ -416,6 +416,8 @@ async fn run_streaming_reduce(
                 last_result = finalize.result;
             } else if !finalize.stdout.trim().is_empty() {
                 last_result = Some(finalize.stdout.trim().to_string());
+            } else if finalize.error.is_some() {
+                last_error = finalize.error; // surface NameError etc. for debugging
             }
         }
     }
@@ -429,7 +431,8 @@ async fn run_streaming_reduce(
 /// target (`name = ...`). Used to auto-capture the reduce result when the fn
 /// ends with a statement instead of a bare expression.
 fn last_assigned_var(reduce_fn: &str) -> Option<String> {
-    let re = regex::Regex::new(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)").ok()?;
+    // regex crate has no lookahead — use `=([^=]|$)` instead of `=(?!=)`.
+    let re = regex::Regex::new(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=([^=]|$)").ok()?;
     for line in reduce_fn.lines().rev() {
         if let Some(cap) = re.captures(line) {
             return Some(cap[1].to_string());
