@@ -78,7 +78,15 @@ pub async fn create_swarm(
     let swarm_id = Uuid::new_v4().to_string();
     let n = body.data.len();
 
-    // ── Step 1: template session → checkpoint (logical fork source) ───────────
+    // ── Step 1: kick off N worker sessions in parallel with the template ──────
+    // Pre-warm sessions NOW so that by the time template_code finishes they are
+    // ready. This eliminates cold-start latency for every worker.
+    let pre_warm_handles: Vec<_> = (0..n).map(|_| {
+        let s = state.clone();
+        tokio::spawn(async move { s.sessions.create_session(None).await })
+    }).collect();
+
+    // ── Step 2: template session → checkpoint (logical fork source) ───────────
     let template_checkpoint_id = if let Some(ref tpl_code) = body.template_code {
         let tpl_session = state.sessions.create_session(None).await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -124,20 +132,29 @@ pub async fn create_swarm(
         None
     };
 
-    // ── Step 2: create swarm record + worker slots ────────────────────────────
+    // ── Step 3: collect pre-warmed session IDs (they've been warming in parallel)
+    let mut pre_warmed_sessions: Vec<Option<String>> = Vec::with_capacity(n);
+    for handle in pre_warm_handles {
+        let sid = handle.await.ok()
+            .and_then(|r| r.ok())
+            .map(|info| info.session_id);
+        pre_warmed_sessions.push(sid);
+    }
+
+    // ── Step 4: create swarm record + worker slots ────────────────────────────
     state.db.create_swarm(&swarm_id, &api_key, n, template_checkpoint_id.as_deref(), body.webhook_url.as_deref())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut worker_ids = Vec::with_capacity(n);
-    for (i, partition) in body.data.iter().enumerate() {
+    for (i, (partition, pre_sid)) in body.data.iter().zip(pre_warmed_sessions).enumerate() {
         let wid = Uuid::new_v4().to_string();
         let partition_json = serde_json::to_string(partition).unwrap_or_else(|_| "null".into());
         state.db.create_swarm_worker(&wid, &swarm_id, i, &partition_json)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        worker_ids.push((wid, partition.clone()));
+        worker_ids.push((wid, partition.clone(), pre_sid));
     }
 
-    // ── Step 3: spawn background orchestrator ─────────────────────────────────
+    // ── Step 5: spawn background orchestrator ─────────────────────────────────
     let state_clone = state.clone();
     let swarm_id_clone = swarm_id.clone();
     let api_key_clone = api_key.clone();
@@ -167,7 +184,7 @@ async fn run_swarm(
     state: Arc<AppState>,
     swarm_id: String,
     api_key: String,
-    workers: Vec<(String, Value)>,              // (worker_id, partition)
+    workers: Vec<(String, Value, Option<String>)>,  // (worker_id, partition, pre_warmed_session_id)
     template_checkpoint_id: Option<String>,
     map_fn: String,
     reduce_fn: Option<String>,
@@ -176,8 +193,8 @@ async fn run_swarm(
     let n = workers.len();
     let (tx, mut rx) = mpsc::channel::<WorkerResult>(n);
 
-    // Spawn all workers in parallel
-    for (worker_id, partition) in workers {
+    // Spawn all workers in parallel — each gets its pre-warmed session
+    for (worker_id, partition, pre_sid) in workers {
         let state2 = state.clone();
         let swarm_id2 = swarm_id.clone();
         let ckpt = template_checkpoint_id.clone();
@@ -185,7 +202,7 @@ async fn run_swarm(
         let tx2 = tx.clone();
         let api2 = api_key.clone();
 
-        tokio::spawn(run_worker(state2, swarm_id2, worker_id, partition, ckpt, api2, map, tx2));
+        tokio::spawn(run_worker(state2, swarm_id2, worker_id, partition, pre_sid, ckpt, api2, map, tx2));
     }
     drop(tx); // close sender so rx ends when all workers finish
 
@@ -235,6 +252,7 @@ async fn run_worker(
     swarm_id: String,
     worker_id: String,
     partition: Value,
+    pre_warmed_session_id: Option<String>,   // handed down from create_swarm
     template_checkpoint_id: Option<String>,
     api_key: String,
     map_fn: String,
@@ -242,20 +260,26 @@ async fn run_worker(
 ) {
     let start = Instant::now();
 
-    // Create session
-    let session_info = match state.sessions.create_session(None).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(worker_id, "Failed to create worker session: {}", e);
-            state.db.set_worker_done(&worker_id, &swarm_id, "", None, Some(&e), &[], 0);
-            let _ = tx.send(WorkerResult { worker_index: 0, result: None, stdout: String::new(), error: Some(e) }).await;
-            return;
+    // Use the pre-warmed session if available, otherwise create a new one.
+    // Pre-warming means this session was already started in parallel with the
+    // template run, so no cold-start penalty here.
+    let session_id = if let Some(sid) = pre_warmed_session_id {
+        sid
+    } else {
+        match state.sessions.create_session(None).await {
+            Ok(s) => s.session_id,
+            Err(e) => {
+                tracing::error!(worker_id, "Failed to create worker session: {}", e);
+                state.db.set_worker_done(&worker_id, &swarm_id, "", None, Some(&e), &[], 0);
+                let _ = tx.send(WorkerResult { worker_index: 0, result: None, stdout: String::new(), error: Some(e) }).await;
+                return;
+            }
         }
     };
 
-    state.db.set_worker_running(&worker_id, &session_info.session_id);
+    state.db.set_worker_running(&worker_id, &session_id);
 
-    let session = match state.sessions.get_session(&session_info.session_id) {
+    let session = match state.sessions.get_session(&session_id) {
         Some(s) => s,
         None => {
             state.db.set_worker_done(&worker_id, &swarm_id, "", None, Some("session disappeared"), &[], 0);
@@ -317,7 +341,7 @@ async fn run_worker(
         duration_ms,
     );
 
-    state.sessions.terminate_session(&session_info.session_id);
+    state.sessions.terminate_session(&session_id);
 
     let _ = tx.send(WorkerResult {
         worker_index,
