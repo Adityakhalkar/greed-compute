@@ -401,9 +401,41 @@ async fn run_streaming_reduce(
         tracing::info!(swarm_id, completed, total, "Streaming reduce updated");
     }
 
+    // ── Finalize: eval the last assigned variable in reduce_fn ───────────────
+    // If reduce_fn ends with an assignment (`var = expr`) rather than a bare
+    // expression, no result is captured by _split_last_expr. Run one final
+    // execute that evaluates the last-assigned variable by name so the result
+    // is always captured regardless of how the user wrote their reduce_fn.
+    if last_result.is_none() {
+        if let Some(var) = last_assigned_var(reduce_fn) {
+            let finalize = {
+                let mut rt = session.runtime.lock().await;
+                rt.execute(&var).await
+            };
+            if finalize.result.is_some() {
+                last_result = finalize.result;
+            } else if !finalize.stdout.trim().is_empty() {
+                last_result = Some(finalize.stdout.trim().to_string());
+            }
+        }
+    }
+
     state.sessions.terminate_session(&reduce_session.session_id);
 
     (last_stdout, last_result, last_error)
+}
+
+/// Scan reduce_fn lines from the bottom and return the first simple assignment
+/// target (`name = ...`). Used to auto-capture the reduce result when the fn
+/// ends with a statement instead of a bare expression.
+fn last_assigned_var(reduce_fn: &str) -> Option<String> {
+    let re = regex::Regex::new(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)").ok()?;
+    for line in reduce_fn.lines().rev() {
+        if let Some(cap) = re.captures(line) {
+            return Some(cap[1].to_string());
+        }
+    }
+    None
 }
 
 // ── GET /v1/swarm/{id} ────────────────────────────────────────────────────────
