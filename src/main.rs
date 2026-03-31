@@ -53,6 +53,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::api::workspace::WorkspaceMap;
 use crate::db::Database;
 use crate::sandbox::SessionManager;
 
@@ -61,6 +62,8 @@ pub struct AppState {
     pub db: Database,
     /// Sliding window rate limiter: api_key → timestamps of recent requests (last 60s)
     pub rate_windows: DashMap<String, VecDeque<Instant>>,
+    /// Live workspace runtimes: workspace_id → locked PythonRuntime
+    pub workspaces: WorkspaceMap,
 }
 
 #[tokio::main]
@@ -109,7 +112,12 @@ async fn main() {
         sweep_sessions.run_sweeper().await;
     });
 
-    let state = Arc::new(AppState { sessions, db, rate_windows: DashMap::new() });
+    let state = Arc::new(AppState {
+        sessions,
+        db,
+        rate_windows: DashMap::new(),
+        workspaces: Arc::new(DashMap::new()),
+    });
 
     // Grace-checkpoint + retention cleanup task
     let grace_state = state.clone();
