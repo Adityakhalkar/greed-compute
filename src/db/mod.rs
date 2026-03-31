@@ -398,6 +398,38 @@ impl Database {
         .unwrap_or(false)
     }
 
+    /// Total bytes used by all checkpoints for this API key.
+    pub fn checkpoint_storage_used(&self, api_key: &str) -> u64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM checkpoints WHERE api_key = ?1",
+            params![api_key],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) as u64
+    }
+
+    /// Return all checkpoints older than `retention_days` days, across all keys,
+    /// grouped with their paths so the caller can delete the files.
+    pub fn list_expired_checkpoints(&self, retention_days: u32) -> Vec<(String, String, String)> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = format!("-{} days", retention_days);
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.api_key, c.path FROM checkpoints c
+             JOIN api_keys k ON c.api_key = k.key
+             WHERE c.created_at < datetime('now', ?1)
+             ORDER BY c.created_at ASC"
+        ).unwrap();
+        stmt.query_map(params![cutoff], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
+    /// Delete checkpoint record by id only (used by retention cleanup — no key check).
+    pub fn delete_checkpoint_by_id(&self, id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM checkpoints WHERE id = ?1", params![id]);
+    }
+
     // ── Jobs CRUD ────────────────────────────────────────────────────────────
 
     pub fn create_job(
