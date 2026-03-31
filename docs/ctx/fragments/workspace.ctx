@@ -1,0 +1,54 @@
+WORKSPACE [shared Python state across multiple agents and models]
+deps=index.ctx exec.ctx checkpoint.ctx
+
+# Workspace = named, persistent Python session. Multiple agents (any model) share
+# one interpreter. Writes serialize automatically. State auto-saved after each execute.
+
+workspace.create:
+  POST /workspaces
+  body: {name:str}
+  → {id:str, name:str, owner_api_key:str, created_at:iso8601, live:bool}
+
+workspace.list:
+  GET /workspaces
+  → [{id, name, owner_api_key, live, last_accessed_at}]
+
+workspace.get:
+  GET /workspaces/{id}
+  → {id, name, owner_api_key, live, members:[{api_key, role, added_at}]}
+
+workspace.execute:
+  POST /workspaces/{id}/execute
+  body: {code:str}
+  → {stdout:str, result:any|null, error:str|null, duration_ms:int}
+  note: serialized per workspace — concurrent calls queue, never corrupt state
+
+workspace.invite:
+  POST /workspaces/{id}/invite
+  body: {api_key:str}
+  → {invited:str}
+  note: owner-only
+
+workspace.kick:
+  DELETE /workspaces/{id}/members/{api_key}
+  → {removed:str}
+
+workspace.delete:
+  DELETE /workspaces/{id}
+  → 204  (owner-only, kills runtime + deletes checkpoint)
+
+roles: owner(all) member(execute only)
+persistence: auto-checkpoint after every execute via dill
+restore: on first access after restart, state reloaded from last checkpoint
+
+ex:
+  # Agent A (Claude) sets up
+  POST /workspaces {"name":"research-run-42"} → {"id":"ws_abc"}
+  POST /workspaces/ws_abc/execute {"code":"results=[]; model=load_model()"}
+
+  # Invite Agent B (GPT-4)
+  POST /workspaces/ws_abc/invite {"api_key":"gpt4-key"}
+
+  # Agent B reads shared state
+  POST /workspaces/ws_abc/execute {"code":"len(results)"}  [key=gpt4-key]
+  → {"result":0}   # same interpreter

@@ -1,0 +1,36 @@
+CHECKPOINT [save and restore Python interpreter state]
+deps=index.ctx exec.ctx
+
+# Checkpoint = serialized Python state (dill). Survives server restarts.
+# Auto-saved on session expiry if under storage quota.
+
+checkpoint.create:
+  POST /sessions/{session_id}/checkpoint
+  body: {name:str}
+  → {checkpoint_id:str, size_bytes:int, expires_in_days:int,
+     storage_used_mb:float, storage_limit_mb:float}
+
+checkpoint.list:
+  GET /checkpoints
+  → [{id, name, created_at, size_bytes, expires_in_days}]
+
+checkpoint.restore:
+  POST /checkpoints/{checkpoint_id}/restore
+  → {session_id:str, expires_at:iso8601}
+  note: creates a NEW session with state loaded from checkpoint
+
+checkpoint.delete:
+  DELETE /checkpoints/{checkpoint_id}
+  → 204
+
+retention: free=7d pro=30d enterprise=90d
+quota:     free=500MB pro=5GB enterprise=50GB
+quota-err: 507 {"error":"storage_quota_exceeded","used_mb":N,"limit_mb":N}
+
+ex:
+  # save state
+  POST /sessions/abc123/checkpoint {"name":"after-training"}
+  → {"checkpoint_id":"ck_xyz","expires_in_days":7}
+  # restore later (new session, same state)
+  POST /checkpoints/ck_xyz/restore
+  → {"session_id":"new_session_id"}

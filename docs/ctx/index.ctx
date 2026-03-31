@@ -1,0 +1,28 @@
+GREED-COMPUTE v1
+base=https://compute.deep-ml.com/v1
+auth=header:X-API-Key
+format=json content-type=application/json
+
+# Load this file first (~150 tokens). Load fragments only for what you need.
+
+goals:
+  run-code                  → fragments/exec.ctx
+  save-restore-state        → fragments/checkpoint.ctx
+  parallel-map-reduce       → fragments/swarm.ctx
+  share-state-across-agents → fragments/workspace.ctx
+  check-limits-or-upgrade   → fragments/billing.ctx
+  handle-errors             → fragments/errors.ctx
+
+quick-ref:
+  session.create  POST /sessions
+  session.exec    POST /sessions/{id}/execute
+  session.stream  POST /sessions/{id}/execute/stream [SSE]
+  checkpoint      POST /sessions/{id}/checkpoint
+  restore         POST /checkpoints/{id}/restore
+  swarm           POST /swarm
+  workspace       POST /workspaces
+  ws.exec         POST /workspaces/{id}/execute
+  usage           GET  /usage
+
+tiers: free(60rpm,500MB,7d) pro(600rpm,5GB,30d) enterprise(unlimited)
+errors: → fragments/errors.ctx

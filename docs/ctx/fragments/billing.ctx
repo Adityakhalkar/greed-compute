@@ -1,0 +1,29 @@
+BILLING [usage, limits, plan upgrades]
+deps=index.ctx
+
+usage.get:
+  GET /usage
+  → {
+    plan: "free"|"pro"|"enterprise",
+    requests: {used:int, limit:int, remaining:int, window:"daily"},
+    storage: {used_mb:float, limit_mb:float, remaining_mb:float},
+    checkpoint_retention_days: int
+  }
+
+tiers:
+  free:       60rpm  | 500MB storage | 7d  retention | $0
+  pro:        600rpm | 5GB storage   | 30d retention | $49/mo
+  enterprise: unlimited              | 50GB          | 90d retention | $299/mo
+
+billing.checkout:
+  POST /billing/checkout
+  body: {plan:"pro"|"enterprise", success_url:str, cancel_url:str}
+  → {checkout_url:str}  # redirect user here for Stripe payment
+
+billing.portal:
+  POST /billing/portal
+  body: {return_url:str}
+  → {portal_url:str}  # manage subscription, invoices, cancel
+
+rate-limit-hit: 429 {"error":"rate_limit","limit":60,"window":"1m","upgrade":"https://compute.deep-ml.com/billing"}
+quota-hit:      507 {"error":"storage_quota_exceeded","used_mb":N,"limit_mb":N}

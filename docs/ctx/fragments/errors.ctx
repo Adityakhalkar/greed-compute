@@ -1,0 +1,33 @@
+ERRORS [status codes, causes, fixes]
+deps=index.ctx
+
+400  bad-request         malformed JSON or missing required field
+                         fix: check body schema in relevant fragment
+
+401  unauthorized        missing or invalid X-API-Key header
+                         fix: set header X-API-Key: <your-key>
+
+403  forbidden           action requires owner role (invite/delete workspace)
+                         fix: use owner's API key
+
+404  not-found           session expired, checkpoint deleted, or workspace not yours
+                         session-fix: create new session via POST /sessions
+                         checkpoint-fix: list via GET /checkpoints and restore valid one
+                         workspace-fix: list via GET /workspaces
+
+429  rate-limited        too many requests in 60s window
+                         body: {limit:int, window:"1m", plan:str, upgrade:url}
+                         fix: backoff and retry, or upgrade plan
+
+507  storage-quota       checkpoint storage full for your plan
+                         body: {used_mb:float, limit_mb:float}
+                         fix: delete old checkpoints or upgrade plan
+
+500  internal            worker process crashed or Python error
+                         body: {error:str}   # contains Python traceback
+                         fix: check code for syntax/runtime errors
+
+# Common patterns
+session-expired → re-create session, optionally restore from checkpoint
+rate-limited    → exponential backoff: 1s, 2s, 4s, 8s
+quota-exceeded  → GET /checkpoints, DELETE old ones, retry
