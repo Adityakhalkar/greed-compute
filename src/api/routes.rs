@@ -64,11 +64,14 @@ pub fn router() -> Router<Arc<AppState>> {
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let pool_size = state.sessions.warm_pool_size().await;
+    let template_pools = state.sessions.template_pool_sizes().await;
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "active_sessions": state.sessions.active_session_count(),
         "warm_pool": pool_size,
+        "template_pools": template_pools,
+        "templates": ["data-science", "machine-learning", "web-scraping", "blank"],
     }))
 }
 
@@ -77,6 +80,8 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct CreateSessionRequest {
     ttl_seconds: Option<i64>,
+    /// Pre-built template: "data-science", "machine-learning", "web-scraping", "blank"
+    template: Option<String>,
     /// Packages to pip install before the session is ready
     packages: Option<Vec<String>>,
     /// Restore a saved checkpoint into the new session immediately
@@ -88,8 +93,12 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::sandbox::SessionTemplate;
     let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-    let session = match state.sessions.create_session_for_key(body.ttl_seconds, api_key).await {
+    let template = body.template.as_deref()
+        .and_then(SessionTemplate::from_str)
+        .unwrap_or(SessionTemplate::Blank);
+    let session = match state.sessions.create_session_for_key(body.ttl_seconds, api_key, Some(template)).await {
         Ok(info) => info,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create session");

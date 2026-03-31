@@ -106,6 +106,12 @@ async fn main() {
     // Pre-fill warm pool at startup
     sessions.fill_warm_pool().await;
 
+    // Pre-warm template pools in background (don't block startup)
+    let sessions_arc = Arc::new(sessions);
+    sessions_arc.spawn_template_warmup();
+    let sessions = (*sessions_arc).clone();
+    drop(sessions_arc);
+
     // Start TTL sweeper — kills expired sessions + refills warm pool
     let sweep_sessions = sessions.clone();
     tokio::spawn(async move {
