@@ -103,6 +103,28 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_swarms_key ON swarms(api_key);
             CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);
 
+            -- SAW: Shared Agent Workspaces
+            CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                owner_api_key TEXT NOT NULL,
+                checkpoint_path TEXT,
+                created_at TEXT NOT NULL,
+                last_accessed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_members (
+                workspace_id TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (workspace_id, api_key),
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_api_key);
+            CREATE INDEX IF NOT EXISTS idx_workspace_members_key ON workspace_members(api_key);
+
             -- Enterprise: detailed per-event usage tracking
             CREATE TABLE IF NOT EXISTS usage_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -602,6 +624,120 @@ impl Database {
         }).unwrap().filter_map(|r| r.ok()).collect()
     }
 
+    // ── Workspace CRUD ────────────────────────────────────────────────────────
+
+    pub fn create_workspace(&self, id: &str, name: &str, owner_api_key: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO workspaces (id, name, owner_api_key, created_at, last_accessed_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, name, owner_api_key, now],
+        )?;
+        // Owner is also a member
+        conn.execute(
+            "INSERT INTO workspace_members (workspace_id, api_key, role, added_at) VALUES (?1, ?2, 'owner', ?3)",
+            params![id, owner_api_key, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_workspace(&self, id: &str) -> Option<WorkspaceRecord> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, name, owner_api_key, checkpoint_path, created_at, last_accessed_at FROM workspaces WHERE id = ?1",
+            params![id],
+            workspace_from_row,
+        ).ok()
+    }
+
+    pub fn list_workspaces(&self, api_key: &str) -> Vec<WorkspaceRecord> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT w.id, w.name, w.owner_api_key, w.checkpoint_path, w.created_at, w.last_accessed_at
+             FROM workspaces w
+             JOIN workspace_members m ON w.id = m.workspace_id
+             WHERE m.api_key = ?1
+             ORDER BY w.last_accessed_at DESC"
+        ).unwrap();
+        stmt.query_map(params![api_key], workspace_from_row)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    pub fn can_access_workspace(&self, workspace_id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM workspace_members WHERE workspace_id = ?1 AND api_key = ?2",
+            params![workspace_id, api_key],
+            |_| Ok(true),
+        ).unwrap_or(false)
+    }
+
+    pub fn is_workspace_owner(&self, workspace_id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM workspaces WHERE id = ?1 AND owner_api_key = ?2",
+            params![workspace_id, api_key],
+            |_| Ok(true),
+        ).unwrap_or(false)
+    }
+
+    pub fn add_workspace_member(&self, workspace_id: &str, api_key: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_members (workspace_id, api_key, role, added_at) VALUES (?1, ?2, 'member', ?3)",
+            params![workspace_id, api_key, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_workspace_member(&self, workspace_id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM workspace_members WHERE workspace_id = ?1 AND api_key = ?2 AND role != 'owner'",
+            params![workspace_id, api_key],
+        ).map(|n| n > 0).unwrap_or(false)
+    }
+
+    pub fn list_workspace_members(&self, workspace_id: &str) -> Vec<WorkspaceMember> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT api_key, role, added_at FROM workspace_members WHERE workspace_id = ?1 ORDER BY added_at"
+        ).unwrap();
+        stmt.query_map(params![workspace_id], |row| {
+            Ok(WorkspaceMember { api_key: row.get(0)?, role: row.get(1)?, added_at: row.get(2)? })
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn update_workspace_checkpoint(&self, id: &str, checkpoint_path: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE workspaces SET checkpoint_path = ?1, last_accessed_at = ?2 WHERE id = ?3",
+            params![checkpoint_path, Utc::now().to_rfc3339(), id],
+        );
+    }
+
+    pub fn touch_workspace(&self, id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE workspaces SET last_accessed_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), id],
+        );
+    }
+
+    pub fn delete_workspace(&self, id: &str, owner_api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM workspaces WHERE id = ?1 AND owner_api_key = ?2",
+            params![id, owner_api_key],
+        ).unwrap_or(0);
+        if n > 0 {
+            let _ = conn.execute("DELETE FROM workspace_members WHERE workspace_id = ?1", params![id]);
+        }
+        n > 0
+    }
+
     pub fn list_session_jobs(&self, session_id: &str, api_key: &str) -> Vec<JobRecord> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -728,4 +864,32 @@ pub struct CheckpointInfo {
     pub path: String,
     pub created_at: String,
     pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceRecord {
+    pub id: String,
+    pub name: String,
+    pub owner_api_key: String,
+    pub checkpoint_path: Option<String>,
+    pub created_at: String,
+    pub last_accessed_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceMember {
+    pub api_key: String,
+    pub role: String,
+    pub added_at: String,
+}
+
+fn workspace_from_row(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceRecord> {
+    Ok(WorkspaceRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        owner_api_key: row.get(2)?,
+        checkpoint_path: row.get(3)?,
+        created_at: row.get(4)?,
+        last_accessed_at: row.get(5)?,
+    })
 }

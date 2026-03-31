@@ -53,6 +53,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::api::workspace::WorkspaceMap;
 use crate::db::Database;
 use crate::sandbox::SessionManager;
 
@@ -61,6 +62,8 @@ pub struct AppState {
     pub db: Database,
     /// Sliding window rate limiter: api_key → timestamps of recent requests (last 60s)
     pub rate_windows: DashMap<String, VecDeque<Instant>>,
+    /// Live workspace runtimes: workspace_id → locked PythonRuntime
+    pub workspaces: WorkspaceMap,
 }
 
 #[tokio::main]
@@ -109,7 +112,68 @@ async fn main() {
         sweep_sessions.run_sweeper().await;
     });
 
-    let state = Arc::new(AppState { sessions, db, rate_windows: DashMap::new() });
+    let state = Arc::new(AppState {
+        sessions,
+        db,
+        rate_windows: DashMap::new(),
+        workspaces: Arc::new(DashMap::new()),
+    });
+
+    // Grace-checkpoint + retention cleanup task
+    let grace_state = state.clone();
+    tokio::spawn(async move {
+        let checkpoint_dir = std::path::PathBuf::from(
+            std::env::var("GREED_CHECKPOINT_DIR")
+                .unwrap_or_else(|_| "/tmp/greed-compute/checkpoints".into()),
+        );
+        let _ = std::fs::create_dir_all(&checkpoint_dir);
+        let mut last_retention = std::time::Instant::now();
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+            // ── Grace checkpoint expired sessions ─────────────────────────
+            let expired = grace_state.sessions.drain_expired();
+            if !expired.is_empty() {
+                tracing::info!(count = expired.len(), "Processing expired sessions");
+            }
+            for (session_id, session) in expired {
+                let calls = session.calls_used();
+                if calls > 0 {
+                    if let Some(ref key) = session.api_key {
+                        let tier = grace_state.db.validate_api_key(key)
+                            .map(|k| k.tier)
+                            .unwrap_or_else(|| "free".into());
+                        let limits = crate::billing::PlanLimits::for_tier(&tier);
+                        let used = grace_state.db.checkpoint_storage_used(key);
+                        if used < limits.checkpoint_storage_bytes {
+                            let ckpt_id = uuid::Uuid::new_v4().to_string();
+                            let path = checkpoint_dir.join(format!("{}.dill", ckpt_id));
+                            let path_str = path.to_string_lossy().to_string();
+                            if let Ok(mut rt) = session.runtime.try_lock() {
+                                let (size, err) = rt.create_checkpoint(&path_str).await;
+                                if err.is_none() && size > 0 {
+                                    let name = format!("autosave-{}", &session_id[..8]);
+                                    let _ = grace_state.db.create_checkpoint_record(
+                                        &ckpt_id, key, &name, &path_str, size as i64,
+                                    );
+                                    tracing::info!(session_id, ckpt_id, size,
+                                        "Grace checkpoint on expiry");
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&session.workspace);
+            }
+
+            // ── Hourly retention cleanup ──────────────────────────────────
+            if last_retention.elapsed() >= std::time::Duration::from_secs(3600) {
+                last_retention = std::time::Instant::now();
+                run_retention_cleanup(&grace_state, &checkpoint_dir);
+            }
+        }
+    });
 
     // Grace-checkpoint + retention cleanup task
     let grace_state = state.clone();

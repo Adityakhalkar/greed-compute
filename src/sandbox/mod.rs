@@ -194,6 +194,9 @@ impl SessionManager {
         self.sessions.len()
     }
 
+    pub fn worker_path(&self) -> String { self.worker_path.clone() }
+    pub fn python_path(&self) -> String { self.python_path.clone() }
+
     pub async fn warm_pool_size(&self) -> usize {
         self.warm_pool.lock().await.len()
     }
