@@ -6,12 +6,12 @@ format=json content-type=application/json
 # Load this file first (~150 tokens). Load fragments only for what you need.
 
 goals:
-  run-code                  → fragments/exec.ctx
-  save-restore-state        → fragments/checkpoint.ctx
-  parallel-map-reduce       → fragments/swarm.ctx
-  share-state-across-agents → fragments/workspace.ctx
-  check-limits-or-upgrade   → fragments/billing.ctx
-  handle-errors             → fragments/errors.ctx
+  run-code                  → fragments/exec.cuntext
+  save-restore-state        → fragments/checkpoint.cuntext
+  parallel-map-reduce       → fragments/swarm.cuntext
+  share-state-across-agents → fragments/workspace.cuntext
+  check-limits-or-upgrade   → fragments/billing.cuntext
+  handle-errors             → fragments/errors.cuntext
 
 quick-ref:
   session.create  POST /sessions
@@ -25,4 +25,4 @@ quick-ref:
   usage           GET  /usage
 
 tiers: free(60rpm,500MB,7d) pro(600rpm,5GB,30d) enterprise(unlimited)
-errors: → fragments/errors.ctx
+errors: → fragments/errors.cuntext

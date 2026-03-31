@@ -1,5 +1,5 @@
 SWARM [parallel map-reduce over a Python session]
-deps=index.ctx exec.ctx
+deps=index.cuntext exec.cuntext
 
 # Swarm = run template code once (CALF fork), then execute worker_fn on each
 # partition in parallel, then reduce results. ~500x faster than cold sessions.

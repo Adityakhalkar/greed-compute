@@ -1,5 +1,5 @@
 EXEC [run-code in a stateful session]
-deps=index.ctx
+deps=index.cuntext
 
 # Session = persistent Python interpreter. State survives across calls. TTL=15min, resets on use.
 

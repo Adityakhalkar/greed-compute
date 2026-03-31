@@ -1,5 +1,5 @@
 WORKSPACE [shared Python state across multiple agents and models]
-deps=index.ctx exec.ctx checkpoint.ctx
+deps=index.cuntext exec.cuntext checkpoint.cuntext
 
 # Workspace = named, persistent Python session. Multiple agents (any model) share
 # one interpreter. Writes serialize automatically. State auto-saved after each execute.

@@ -1,5 +1,5 @@
 CHECKPOINT [save and restore Python interpreter state]
-deps=index.ctx exec.ctx
+deps=index.cuntext exec.cuntext
 
 # Checkpoint = serialized Python state (dill). Survives server restarts.
 # Auto-saved on session expiry if under storage quota.

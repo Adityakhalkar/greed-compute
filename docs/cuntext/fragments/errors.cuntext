@@ -1,5 +1,5 @@
 ERRORS [status codes, causes, fixes]
-deps=index.ctx
+deps=index.cuntext
 
 400  bad-request         malformed JSON or missing required field
                          fix: check body schema in relevant fragment

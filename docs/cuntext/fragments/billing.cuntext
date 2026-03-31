@@ -1,5 +1,5 @@
 BILLING [usage, limits, plan upgrades]
-deps=index.ctx
+deps=index.cuntext
 
 usage.get:
   GET /usage
