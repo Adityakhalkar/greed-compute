@@ -1,0 +1,30 @@
+GREED-COMPUTE v1
+base=https://compute.deep-ml.com/v1
+auth=header:X-API-Key
+auth-setup=POST /admin/keys {"name":"my-agent"} → {"key":"gc-..."}
+format=json content-type=application/json
+
+# Load this file first (~200 tokens). Load fragments only for what you need.
+
+goals:
+  run-code                  → fragments/exec.cuntext
+  save-restore-state        → fragments/checkpoint.cuntext
+  parallel-map-reduce       → fragments/swarm.cuntext
+  share-state-across-agents → fragments/workspace.cuntext
+  check-limits-or-upgrade   → fragments/billing.cuntext
+  handle-errors             → fragments/errors.cuntext
+
+quick-ref:
+  session.create  POST /sessions
+  session.exec    POST /sessions/{id}/execute
+  session.stream  POST /sessions/{id}/execute/stream [SSE]
+  checkpoint      POST /sessions/{id}/checkpoint  body:{name:str}
+  restore         POST /checkpoints/{id}/restore
+  swarm           POST /swarm
+  workspace       POST /workspaces
+  ws.exec         POST /workspaces/{id}/execute
+  usage           GET  /usage
+
+tiers: free(60rpm,500MB,7d) pro(600rpm,5GB,30d) enterprise(unlimited)
+on-error: 401=bad-key 404=session-expired(recreate) 429=rate-limited(backoff) 507=storage-full
+errors: → fragments/errors.cuntext

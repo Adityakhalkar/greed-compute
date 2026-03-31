@@ -54,6 +54,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/workspaces/:id/execute", post(crate::api::workspace::execute_in_workspace))
         .route("/workspaces/:id/invite", post(crate::api::workspace::invite_member))
         .route("/workspaces/:id/members/:member_key", delete(crate::api::workspace::kick_member))
+        // ── cuntext: LLM-native API discovery ─────────────────────────────
+        .route("/cuntext/index.cuntext", get(cuntext_index))
+        .route("/cuntext/fragments/:name", get(cuntext_fragment))
+        .route("/llms.cuntext", get(cuntext_index))
 }
 
 // ── Health ──────────────────────────────────────────────
@@ -635,5 +639,49 @@ async fn revoke_api_key(
         (StatusCode::OK, Json(serde_json::json!({ "revoked": true, "key": key })))
     } else {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "key not found" })))
+    }
+}
+
+// ── cuntext handlers ──────────────────────────────────────────────────────────
+
+use axum::response::Response;
+use axum::http::header;
+
+const CUNTEXT_INDEX: &str = include_str!("../../docs/cuntext/index.cuntext");
+
+async fn cuntext_index() -> Response {
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(axum::body::Body::from(CUNTEXT_INDEX))
+        .unwrap()
+}
+
+async fn cuntext_fragment(Path(name): Path<String>) -> Response {
+    if name.contains('/') || name.contains("..") || !name.ends_with(".cuntext") {
+        return axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("not found"))
+            .unwrap();
+    }
+    let content: Option<&'static str> = match name.as_str() {
+        "exec.cuntext"        => Some(include_str!("../../docs/cuntext/fragments/exec.cuntext")),
+        "checkpoint.cuntext"  => Some(include_str!("../../docs/cuntext/fragments/checkpoint.cuntext")),
+        "swarm.cuntext"       => Some(include_str!("../../docs/cuntext/fragments/swarm.cuntext")),
+        "workspace.cuntext"   => Some(include_str!("../../docs/cuntext/fragments/workspace.cuntext")),
+        "billing.cuntext"     => Some(include_str!("../../docs/cuntext/fragments/billing.cuntext")),
+        "errors.cuntext"      => Some(include_str!("../../docs/cuntext/fragments/errors.cuntext")),
+        _ => None,
+    };
+    match content {
+        Some(body) => axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(header::CACHE_CONTROL, "public, max-age=3600")
+            .body(axum::body::Body::from(body))
+            .unwrap(),
+        None => axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("not found"))
+            .unwrap(),
     }
 }

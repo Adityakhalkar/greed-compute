@@ -1,0 +1,37 @@
+EXEC [run-code in a stateful session]
+deps=index.cuntext
+
+# Session = persistent Python interpreter. State survives across calls. TTL=15min, resets on use.
+
+session.create:
+  POST /sessions
+  body: {ttl_secs?:int}
+  → {session_id:str, expires_at:iso8601, workspace_path:str}
+
+session.execute:
+  POST /sessions/{session_id}/execute
+  body: {code:str}
+  → {stdout:str, result:any|null, error:str|null, plots:[str], duration_ms:int}
+  note: result=typed JSON (int/float/list/dict), not string repr
+
+session.stream:
+  POST /sessions/{session_id}/execute/stream
+  body: {code:str}
+  → SSE stream of {type:"stdout"|"result"|"error", data:str}
+  note: use for long-running code, real-time output
+
+session.status:
+  GET /sessions/{session_id}
+  → {active:bool, ttl_remaining:int, calls_used:int}
+
+session.close:
+  DELETE /sessions/{session_id}
+  → 204
+
+ex:
+  # create
+  POST /sessions → {"session_id":"abc123","expires_at":"..."}
+  # run
+  POST /sessions/abc123/execute {"code":"x = 40 + 2"} → {"stdout":"","result":42}
+  # state persists
+  POST /sessions/abc123/execute {"code":"x * 2"} → {"result":84}

@@ -1,0 +1,42 @@
+SWARM [parallel map-reduce over a Python session]
+deps=index.cuntext exec.cuntext
+
+# Swarm = run template code once (CALF fork), then execute worker_fn on each
+# partition in parallel, then reduce results. ~500x faster than cold sessions.
+
+swarm.create:
+  POST /swarm
+  body: {
+    template: str,       # setup code (imports, model load, data prep)
+    worker_fn: str,      # code run per partition; receives `partition` variable
+    partitions: [any],   # list of inputs, one per worker
+    reduce_fn: str,      # code run after all workers; receives `results` list
+    n_workers?: int      # default=len(partitions)
+  }
+  → {
+    swarm_id: str,
+    workers: [{worker_id, partition, status, result?, error?, duration_ms}],
+    reduce_result: any|null,
+    reduce_error: str|null,
+    total_duration_ms: int
+  }
+
+swarm.get:
+  GET /swarm/{swarm_id}
+  → same shape as above
+
+timing: template once → workers parallel (~6-22ms each) → reduce streaming (StAR)
+note: partition injected as `partition` variable, results collected as `results` list
+
+ex:
+  POST /swarm {
+    "template": "import numpy as np",
+    "worker_fn": "result = np.sum(partition)",
+    "partitions": [[1,2,3],[4,5,6],[7,8,9]],
+    "reduce_fn": "total = sum(results)"
+  }
+  → {"reduce_result": 45, "workers":[
+      {"partition":[1,2,3],"result":6,"duration_ms":11},
+      {"partition":[4,5,6],"result":15,"duration_ms":6},
+      {"partition":[7,8,9],"result":24,"duration_ms":22}
+    ]}
