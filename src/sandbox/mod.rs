@@ -8,9 +8,59 @@ use uuid::Uuid;
 
 use crate::runtime::PythonRuntime;
 
-const DEFAULT_TTL_SECS: i64 = 900; // 15 minutes — dedicated VPS, suits notebook workflows
+const DEFAULT_TTL_SECS: i64 = 900; // 15 minutes
 const SWEEPER_INTERVAL_SECS: u64 = 30;
 const WARM_POOL_SIZE: usize = 3;
+
+// ── Session templates ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionTemplate {
+    DataScience,   // numpy pandas matplotlib scikit-learn scipy
+    MachineLearning, // torch transformers datasets accelerate
+    WebScraping,   // requests httpx beautifulsoup4 lxml
+    Blank,         // nothing pre-installed (default)
+}
+
+impl SessionTemplate {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "data-science" | "data_science" | "datascience" => Some(Self::DataScience),
+            "ml" | "machine-learning" | "machine_learning" => Some(Self::MachineLearning),
+            "web" | "web-scraping" | "scraping" => Some(Self::WebScraping),
+            "blank" | "" => Some(Self::Blank),
+            _ => None,
+        }
+    }
+
+    pub fn packages(&self) -> &[&str] {
+        match self {
+            Self::DataScience => &["numpy", "pandas", "matplotlib", "scikit-learn", "scipy"],
+            Self::MachineLearning => &["torch", "transformers", "datasets", "accelerate"],
+            Self::WebScraping => &["requests", "httpx", "beautifulsoup4", "lxml"],
+            Self::Blank => &[],
+        }
+    }
+
+    pub fn install_code(&self) -> Option<String> {
+        let pkgs = self.packages();
+        if pkgs.is_empty() { return None; }
+        Some(format!(
+            "import subprocess as _sp\n_sp.run(['pip','install','-q',{}], check=True)\ndel _sp",
+            pkgs.iter().map(|p| format!("'{}'", p)).collect::<Vec<_>>().join(",")
+        ))
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::DataScience => "data-science",
+            Self::MachineLearning => "machine-learning",
+            Self::WebScraping => "web-scraping",
+            Self::Blank => "blank",
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInfo {
@@ -19,6 +69,7 @@ pub struct SessionInfo {
     pub expires_at: DateTime<Utc>,
     pub calls_used: u64,
     pub workspace_path: String,
+    pub template: Option<String>,
 }
 
 pub struct Session {
@@ -55,18 +106,100 @@ impl Session {
 pub struct SessionManager {
     sessions: Arc<DashMap<String, Arc<Session>>>,
     warm_pool: Arc<Mutex<Vec<PythonRuntime>>>,
+    /// Pre-warmed template pools: template name → ready runtimes with packages installed
+    template_pools: Arc<DashMap<String, Arc<Mutex<Vec<PythonRuntime>>>>>,
     worker_path: String,
     python_path: String,
 }
 
 impl SessionManager {
     pub fn new(worker_path: String, python_path: String) -> Self {
+        let template_pools: Arc<DashMap<String, Arc<Mutex<Vec<PythonRuntime>>>>> =
+            Arc::new(DashMap::new());
+        // Pre-create pool slots for each template
+        for t in &[SessionTemplate::DataScience, SessionTemplate::MachineLearning, SessionTemplate::WebScraping] {
+            template_pools.insert(t.name().to_string(), Arc::new(Mutex::new(Vec::new())));
+        }
         Self {
             sessions: Arc::new(DashMap::new()),
             warm_pool: Arc::new(Mutex::new(Vec::with_capacity(WARM_POOL_SIZE))),
+            template_pools,
             worker_path,
             python_path,
         }
+    }
+
+    /// Pre-warm one session per template at startup (background, don't block).
+    pub fn spawn_template_warmup(self: &Arc<Self>) {
+        for template in &[SessionTemplate::DataScience, SessionTemplate::MachineLearning, SessionTemplate::WebScraping] {
+            let mgr = self.clone();
+            let t = template.clone();
+            tokio::spawn(async move {
+                mgr.fill_template_pool(&t, 1).await;
+            });
+        }
+    }
+
+    async fn fill_template_pool(&self, template: &SessionTemplate, target: usize) {
+        let pool_entry = match self.template_pools.get(template.name()) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let current = pool_entry.lock().await.len();
+        let needed = target.saturating_sub(current);
+        if needed == 0 { return; }
+
+        tracing::info!(template = template.name(), needed, "Pre-warming template pool");
+        let workspace = std::env::temp_dir()
+            .join("greed-compute")
+            .join(format!("_template_{}", template.name()));
+        let _ = std::fs::create_dir_all(&workspace);
+
+        for _ in 0..needed {
+            match PythonRuntime::spawn(&workspace, &self.worker_path, &self.python_path).await {
+                Ok(mut runtime) => {
+                    if let Some(code) = template.install_code() {
+                        let res = runtime.execute(&code).await;
+                        if res.error.is_some() {
+                            tracing::warn!(template = template.name(), "Template install had error, discarding");
+                            continue;
+                        }
+                    }
+                    pool_entry.lock().await.push(runtime);
+                    tracing::info!(template = template.name(), "Template worker ready");
+                }
+                Err(e) => tracing::error!(template = template.name(), error = %e, "Template spawn failed"),
+            }
+        }
+    }
+
+    async fn acquire_template_runtime(&self, template: &SessionTemplate, workspace: &PathBuf) -> Result<PythonRuntime, String> {
+        if let Some(pool_entry) = self.template_pools.get(template.name()) {
+            let mut pool = pool_entry.lock().await;
+            if let Some(mut runtime) = pool.pop() {
+                tracing::info!(template = template.name(), "Assigned pre-warmed template worker");
+                // Wipe any leftover state but keep installed packages
+                runtime.clear_state().await;
+                // Refill pool in background
+                let mgr_clone = SessionManager {
+                    sessions: self.sessions.clone(),
+                    warm_pool: self.warm_pool.clone(),
+                    template_pools: self.template_pools.clone(),
+                    worker_path: self.worker_path.clone(),
+                    python_path: self.python_path.clone(),
+                };
+                let t = template.clone();
+                tokio::spawn(async move { mgr_clone.fill_template_pool(&t, 1).await; });
+                return Ok(runtime);
+            }
+        }
+        // Pool empty — cold spawn + install
+        tracing::warn!(template = template.name(), "Template pool empty, cold-spawning");
+        let mut runtime = PythonRuntime::spawn(workspace, &self.worker_path, &self.python_path).await?;
+        if let Some(code) = template.install_code() {
+            runtime.execute(&code).await;
+        }
+        Ok(runtime)
     }
 
     /// Pre-spawn workers into the warm pool. Call this at startup.
@@ -120,15 +253,15 @@ impl SessionManager {
         PythonRuntime::spawn(workspace, &self.worker_path, &self.python_path).await
     }
 
-    pub async fn create_session_for_key(&self, ttl_secs: Option<i64>, api_key: Option<String>) -> Result<SessionInfo, String> {
-        self.create_session_inner(ttl_secs, api_key).await
+    pub async fn create_session_for_key(&self, ttl_secs: Option<i64>, api_key: Option<String>, template: Option<SessionTemplate>) -> Result<SessionInfo, String> {
+        self.create_session_inner(ttl_secs, api_key, template).await
     }
 
     pub async fn create_session(&self, ttl_secs: Option<i64>) -> Result<SessionInfo, String> {
-        self.create_session_inner(ttl_secs, None).await
+        self.create_session_inner(ttl_secs, None, None).await
     }
 
-    async fn create_session_inner(&self, ttl_secs: Option<i64>, api_key: Option<String>) -> Result<SessionInfo, String> {
+    async fn create_session_inner(&self, ttl_secs: Option<i64>, api_key: Option<String>, template: Option<SessionTemplate>) -> Result<SessionInfo, String> {
         let session_id = Uuid::new_v4().to_string();
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
         let now = Utc::now();
@@ -140,7 +273,10 @@ impl SessionManager {
         std::fs::create_dir_all(&workspace)
             .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
 
-        let runtime = self.acquire_runtime(&workspace).await?;
+        let runtime = match &template {
+            Some(t) if *t != SessionTemplate::Blank => self.acquire_template_runtime(t, &workspace).await?,
+            _ => self.acquire_runtime(&workspace).await?,
+        };
 
         let info = SessionInfo {
             session_id: session_id.clone(),
@@ -148,6 +284,7 @@ impl SessionManager {
             expires_at,
             calls_used: 0,
             workspace_path: workspace.to_string_lossy().to_string(),
+            template: template.as_ref().map(|t| t.name().to_string()),
         };
 
         let session = Arc::new(Session {
@@ -196,6 +333,14 @@ impl SessionManager {
 
     pub fn worker_path(&self) -> String { self.worker_path.clone() }
     pub fn python_path(&self) -> String { self.python_path.clone() }
+
+    pub async fn template_pool_sizes(&self) -> std::collections::HashMap<String, usize> {
+        let mut map = std::collections::HashMap::new();
+        for entry in self.template_pools.iter() {
+            map.insert(entry.key().clone(), entry.value().lock().await.len());
+        }
+        map
+    }
 
     pub async fn warm_pool_size(&self) -> usize {
         self.warm_pool.lock().await.len()
