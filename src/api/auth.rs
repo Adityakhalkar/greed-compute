@@ -23,13 +23,41 @@ pub async fn auth_middleware(
 ) -> Result<Response, Response> {
     let path = request.uri().path().to_string();
 
-    // Skip auth for health check and admin key creation
-    if path == "/v1/health" || path == "/v1/admin/keys" {
+    // Health check — no auth
+    if path == "/v1/health" {
         return Ok(next.run(request).await);
     }
 
-    // Also allow Stripe webhooks without an API key
+    // Stripe webhook — no auth (verified by HMAC signature inside handler)
     if path == "/v1/billing/webhook" {
+        return Ok(next.run(request).await);
+    }
+
+    // cuntext files — public, no auth
+    if path.starts_with("/v1/cuntext/") || path == "/v1/llms.cuntext" {
+        return Ok(next.run(request).await);
+    }
+
+    // Admin endpoints — require GREED_ADMIN_KEY, not a regular API key
+    if path.starts_with("/v1/admin/") {
+        let admin_key = std::env::var("GREED_ADMIN_KEY").unwrap_or_default();
+        if admin_key.is_empty() {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "Admin access not configured"})),
+            ).into_response());
+        }
+        let provided = request
+            .headers()
+            .get("x-admin-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided != admin_key {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Invalid admin key"})),
+            ).into_response());
+        }
         return Ok(next.run(request).await);
     }
 
