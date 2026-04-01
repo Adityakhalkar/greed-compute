@@ -49,14 +49,14 @@ pub fn router() -> Router<Arc<AppState>> {
         // ── SAW: Shared Agent Workspaces ───────────────────────────────────
         .route("/workspaces", post(crate::api::workspace::create_workspace))
         .route("/workspaces", get(crate::api::workspace::list_workspaces))
-        .route("/workspaces/:id", get(crate::api::workspace::get_workspace))
-        .route("/workspaces/:id", delete(crate::api::workspace::delete_workspace))
-        .route("/workspaces/:id/execute", post(crate::api::workspace::execute_in_workspace))
-        .route("/workspaces/:id/invite", post(crate::api::workspace::invite_member))
-        .route("/workspaces/:id/members/:member_key", delete(crate::api::workspace::kick_member))
+        .route("/workspaces/{id}", get(crate::api::workspace::get_workspace))
+        .route("/workspaces/{id}", delete(crate::api::workspace::delete_workspace))
+        .route("/workspaces/{id}/execute", post(crate::api::workspace::execute_in_workspace))
+        .route("/workspaces/{id}/invite", post(crate::api::workspace::invite_member))
+        .route("/workspaces/{id}/members/{member_key}", delete(crate::api::workspace::kick_member))
         // ── cuntext: LLM-native API discovery ─────────────────────────────
         .route("/cuntext/index.cuntext", get(cuntext_index))
-        .route("/cuntext/fragments/:name", get(cuntext_fragment))
+        .route("/cuntext/fragments/{name}", get(cuntext_fragment))
         .route("/llms.cuntext", get(cuntext_index))
 }
 
