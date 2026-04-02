@@ -2,6 +2,13 @@ use rusqlite::{Connection, params};
 use std::sync::Mutex;
 use chrono::Utc;
 
+#[derive(Debug)]
+pub enum AuthError {
+    EmailTaken,
+    InvalidCredentials,
+    Internal,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -101,7 +108,18 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_swarms_key ON swarms(api_key);
-            CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);"
+            CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);
+
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (api_key) REFERENCES api_keys(key)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);"
         )?;
         Ok(())
     }
@@ -412,6 +430,59 @@ impl Database {
                 finished_at: row.get(12)?,
             })
         }).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
+    // ── User Auth ────────────────────────────────────────────────────────────
+
+    pub fn register_user(&self, email: &str, password: &str) -> Result<String, AuthError> {
+        // Check if email already taken
+        {
+            let conn = self.conn.lock().unwrap();
+            let exists: bool = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE email = ?1",
+                params![email],
+                |row| row.get::<_, i64>(0),
+            ).unwrap_or(0) > 0;
+            if exists {
+                return Err(AuthError::EmailTaken);
+            }
+        }
+
+        let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
+            .map_err(|_| AuthError::Internal)?;
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let api_key = format!("gc_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let now = Utc::now().to_rfc3339();
+
+        let conn = self.conn.lock().unwrap();
+        // Create the api_key record first
+        conn.execute(
+            "INSERT INTO api_keys (key, name, tier, created_at) VALUES (?1, ?2, 'free', ?3)",
+            params![api_key, email, now],
+        ).map_err(|_| AuthError::Internal)?;
+        // Create the user
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash, api_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, email, hash, api_key, now],
+        ).map_err(|_| AuthError::Internal)?;
+
+        Ok(api_key)
+    }
+
+    pub fn login_user(&self, email: &str, password: &str) -> Result<String, AuthError> {
+        let conn = self.conn.lock().unwrap();
+        let (hash, api_key): (String, String) = conn.query_row(
+            "SELECT password_hash, api_key FROM users WHERE email = ?1",
+            params![email],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|_| AuthError::InvalidCredentials)?;
+
+        let valid = bcrypt::verify(password, &hash).map_err(|_| AuthError::Internal)?;
+        if !valid {
+            return Err(AuthError::InvalidCredentials);
+        }
+        Ok(api_key)
     }
 
     pub fn list_session_jobs(&self, session_id: &str, api_key: &str) -> Vec<JobRecord> {

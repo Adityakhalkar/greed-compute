@@ -10,6 +10,7 @@ use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
+use crate::db::AuthError;
 use crate::AppState;
 
 static WEBHOOK_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -19,6 +20,8 @@ fn webhook_client() -> &'static reqwest::Client {
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/auth/register", post(register))
+        .route("/auth/login", post(login))
         .route("/health", get(health))
         .route("/session/create", post(create_session))
         .route("/session/{id}", delete(terminate_session))
@@ -584,5 +587,62 @@ async fn revoke_api_key(
         (StatusCode::OK, Json(serde_json::json!({ "revoked": true, "key": key })))
     } else {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "key not found" })))
+    }
+}
+
+// ── Auth ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AuthRequest {
+    email: String,
+    password: String,
+}
+
+async fn register(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AuthRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if body.email.is_empty() || !body.email.contains('@') {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid email" })));
+    }
+    if body.password.len() < 8 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Password must be at least 8 characters" })));
+    }
+
+    match state.db.register_user(&body.email, &body.password) {
+        Ok(api_key) => (StatusCode::CREATED, Json(serde_json::json!({
+            "api_key": api_key,
+            "email": body.email,
+            "plan": "free",
+            "message": "Account created. Save your API key — it won't be shown again."
+        }))),
+        Err(AuthError::EmailTaken) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "Email already registered" })),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Registration failed" })),
+        ),
+    }
+}
+
+async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AuthRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.db.login_user(&body.email, &body.password) {
+        Ok(api_key) => (StatusCode::OK, Json(serde_json::json!({
+            "api_key": api_key,
+            "email": body.email,
+        }))),
+        Err(AuthError::InvalidCredentials) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Invalid email or password" })),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Login failed" })),
+        ),
     }
 }

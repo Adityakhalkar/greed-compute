@@ -27,8 +27,12 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    // Skip auth for health check and admin key creation
-    if request.uri().path() == "/v1/health" || request.uri().path() == "/v1/admin/keys" {
+    let path = request.uri().path();
+
+    // Public endpoints — no API key required
+    if path == "/v1/health"
+        || path.starts_with("/v1/auth/")
+    {
         return Ok(next.run(request).await);
     }
 
