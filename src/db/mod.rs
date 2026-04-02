@@ -121,6 +121,16 @@ impl Database {
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);"
         )?;
+
+        // Migration: add GitHub columns to users (ignore if already exist)
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN github_user_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN github_login TEXT;");
+        let _ = conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users(github_user_id);"
+        );
+        drop(conn);
+
         Ok(())
     }
 
@@ -433,6 +443,45 @@ impl Database {
     }
 
     // ── User Auth ────────────────────────────────────────────────────────────
+
+    /// Find or create a user from GitHub OAuth. Returns (api_key, is_new).
+    pub fn upsert_github_user(
+        &self,
+        github_user_id: &str,
+        github_login: &str,
+        email: &str,
+    ) -> Result<(String, bool), AuthError> {
+        // Check if user already exists by github_user_id
+        {
+            let conn = self.conn.lock().unwrap();
+            let existing: Option<String> = conn.query_row(
+                "SELECT api_key FROM users WHERE github_user_id = ?1",
+                params![github_user_id],
+                |row| row.get(0),
+            ).ok();
+            if let Some(api_key) = existing {
+                return Ok((api_key, false));
+            }
+        }
+
+        // New user — create api_key + user record
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let api_key = format!("gc_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let now = Utc::now().to_rfc3339();
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO api_keys (key, name, tier, created_at) VALUES (?1, ?2, 'free', ?3)",
+            params![api_key, github_login, now],
+        ).map_err(|_| AuthError::Internal)?;
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash, github_user_id, github_login, api_key, created_at)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6)",
+            params![user_id, email, github_user_id, github_login, api_key, now],
+        ).map_err(|_| AuthError::Internal)?;
+
+        Ok((api_key, true))
+    }
 
     pub fn register_user(&self, email: &str, password: &str) -> Result<String, AuthError> {
         // Check if email already taken

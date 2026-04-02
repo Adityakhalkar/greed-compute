@@ -1,12 +1,12 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::sse::{Event, Sse},
+    response::{sse::{Event, Sse}, Redirect},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
@@ -20,6 +20,8 @@ fn webhook_client() -> &'static reqwest::Client {
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/auth/github", get(github_oauth_redirect))
+        .route("/auth/github/callback", get(github_oauth_callback))
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/health", get(health))
@@ -644,5 +646,116 @@ async fn login(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "Login failed" })),
         ),
+    }
+}
+
+// ── GitHub OAuth ──────────────────────────────────────────
+
+async fn github_oauth_redirect() -> Redirect {
+    let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&scope=user:email",
+        client_id
+    );
+    Redirect::to(&url)
+}
+
+async fn github_oauth_callback(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Redirect, (StatusCode, Json<serde_json::Value>)> {
+    let code = params.get("code").cloned().unwrap_or_default();
+    if code.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing code"}))));
+    }
+
+    let client_id     = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
+    let client_secret = std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default();
+    let frontend_url  = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "https://greed-compute-ui.vercel.app".to_string());
+
+    let http = webhook_client();
+
+    // Exchange code for access token
+    let token_resp = http
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+        }))
+        .send()
+        .await
+        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "GitHub unreachable"}))))?;
+
+    let token_json: serde_json::Value = token_resp.json().await
+        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Bad token response"}))))?;
+
+    let access_token = token_json["access_token"].as_str()
+        .unwrap_or("")
+        .to_string();
+    if access_token.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "GitHub auth failed"}))));
+    }
+
+    // Fetch GitHub user info
+    let user_resp = http
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("User-Agent", "greed-compute")
+        .send()
+        .await
+        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "GitHub API unreachable"}))))?;
+
+    let user_json: serde_json::Value = user_resp.json().await
+        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Bad user response"}))))?;
+
+    let github_id    = user_json["id"].as_i64().map(|n| n.to_string()).unwrap_or_default();
+    let github_login = user_json["login"].as_str().unwrap_or("unknown").to_string();
+
+    // Check account age — block accounts < 30 days old
+    if let Some(created_at) = user_json["created_at"].as_str() {
+        if let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_at) {
+            let age_days = (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_days();
+            if age_days < 30 {
+                let redirect = format!("{}/auth/error?reason=account_too_new", frontend_url);
+                return Ok(Redirect::to(&redirect));
+            }
+        }
+    }
+
+    // Fetch primary email
+    let email_resp = http
+        .get("https://api.github.com/user/emails")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("User-Agent", "greed-compute")
+        .send()
+        .await;
+
+    let email = if let Ok(resp) = email_resp {
+        let emails: serde_json::Value = resp.json().await.unwrap_or_default();
+        emails.as_array()
+            .and_then(|arr| arr.iter().find(|e| e["primary"].as_bool() == Some(true)))
+            .and_then(|e| e["email"].as_str())
+            .unwrap_or(&github_login)
+            .to_string()
+    } else {
+        github_login.clone()
+    };
+
+    // Upsert user
+    match state.db.upsert_github_user(&github_id, &github_login, &email) {
+        Ok((api_key, _is_new)) => {
+            let redirect = format!(
+                "{}/dashboard?key={}&login={}",
+                frontend_url, api_key, github_login
+            );
+            Ok(Redirect::to(&redirect))
+        }
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Failed to create account"})),
+        )),
     }
 }
