@@ -122,14 +122,12 @@ impl Database {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);"
         )?;
 
-        // Migration: add GitHub columns to users (ignore if already exist)
-        let conn = self.conn.lock().unwrap();
+        // Migration: add GitHub columns (ignore errors — columns may already exist)
         let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN github_user_id TEXT;");
         let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN github_login TEXT;");
         let _ = conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users(github_user_id);"
         );
-        drop(conn);
 
         Ok(())
     }
