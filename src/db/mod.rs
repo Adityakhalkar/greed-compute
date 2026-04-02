@@ -165,6 +165,25 @@ impl Database {
         ).unwrap_or(0)
     }
 
+    pub fn get_usage_today(&self, api_key: &str) -> i64 {
+        let since = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339();
+        self.get_usage_count(api_key, &since)
+    }
+
+    pub fn get_checkpoint_storage_bytes(&self, api_key: &str) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM checkpoints WHERE api_key = ?1",
+            params![api_key],
+            |row| row.get(0),
+        ).unwrap_or(0)
+    }
+
     pub fn create_api_key(&self, name: &str, tier: &str) -> Result<String, rusqlite::Error> {
         let key = format!("greed_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
         let conn = self.conn.lock().unwrap();

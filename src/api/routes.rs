@@ -40,6 +40,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/checkpoints/{id}", delete(delete_checkpoint))
         .route("/session/{id}/files", post(upload_file))
         .route("/session/{id}/output/{filename}", get(read_file))
+        .route("/usage", get(get_usage))
         .route("/admin/keys", post(create_api_key))
         .route("/admin/keys", get(list_api_keys))
         .route("/admin/keys/{key}/revoke", post(revoke_api_key))
@@ -552,6 +553,46 @@ async fn read_file(
 struct CreateKeyRequest {
     name: String,
     tier: Option<String>,
+}
+
+// ── Usage ────────────────────────────────────────────────
+
+async fn get_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let key_info = state.db.validate_api_key(key);
+    let tier = key_info.as_ref().map(|k| k.tier.as_str()).unwrap_or("free");
+
+    let (req_limit, storage_limit_mb, retention_days): (i64, i64, i64) = match tier {
+        "pro"        => (i64::MAX, 5120, 30),
+        "enterprise" => (i64::MAX, i64::MAX, 365),
+        _            => (100, 50, 1),
+    };
+
+    let used_today   = state.db.get_usage_today(key);
+    let storage_bytes = state.db.get_checkpoint_storage_bytes(key);
+    let storage_mb   = storage_bytes / (1024 * 1024);
+
+    Json(serde_json::json!({
+        "plan": tier,
+        "requests": {
+            "used": used_today,
+            "limit": req_limit,
+            "remaining": (req_limit - used_today).max(0)
+        },
+        "storage": {
+            "used_mb": storage_mb,
+            "limit_mb": storage_limit_mb,
+            "remaining_mb": (storage_limit_mb - storage_mb).max(0)
+        },
+        "checkpoint_retention_days": retention_days
+    }))
 }
 
 async fn create_api_key(

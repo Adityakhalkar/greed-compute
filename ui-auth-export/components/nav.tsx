@@ -16,8 +16,11 @@ export function Nav() {
   const [hasKey, setHasKey] = useState(false)
 
   useEffect(() => {
-    setHasKey(!!localStorage.getItem('greed_api_key'))
-  }, [])
+    const check = () => setHasKey(!!localStorage.getItem('greed_api_key'))
+    check()
+    window.addEventListener('storage', check)
+    return () => window.removeEventListener('storage', check)
+  }, [pathname])
 
   return (
     <nav className="border-b border-border sticky top-0 z-50 bg-background/95 backdrop-blur-sm">
