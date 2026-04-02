@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background:      #0A0A08;
+  --surface:         #111110;
+  --surface-raised:  #1A1A18;
+  --border:          #252522;
+  --border-strong:   #333330;
+  --text-primary:    #EFEFED;
+  --text-secondary:  #888884;
+  --text-tertiary:   #555552;
+  --accent:          #C8F135;
+  --accent-dim:      #8AAD22;
+  --error:           #E84040;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background-color: var(--background);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background-color: var(--accent);
+  color: var(--background);
+}
+
+/* scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* terminal syntax highlight */
+.token-keyword  { color: #C8F135; }
+.token-string   { color: #A8D8A8; }
+.token-comment  { color: #555552; }
+.token-number   { color: #F0A060; }
+.token-function { color: #88C8F0; }
+.token-punct    { color: #888884; }
