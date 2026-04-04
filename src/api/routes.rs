@@ -58,6 +58,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/cuntext/index.cuntext", get(cuntext_index))
         .route("/cuntext/fragments/{name}", get(cuntext_fragment))
         .route("/llms.cuntext", get(cuntext_index))
+        // ── GitHub OAuth ──────────────────────────────────────────────
+        .route("/auth/github", get(github_oauth_start))
+        .route("/auth/github/callback", get(github_oauth_callback))
 }
 
 // ── Health ──────────────────────────────────────────────
@@ -664,6 +667,114 @@ async fn cuntext_index() -> Response {
         .header(header::CACHE_CONTROL, "public, max-age=3600")
         .body(axum::body::Body::from(CUNTEXT_INDEX))
         .unwrap()
+}
+
+// ── GitHub OAuth ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct OAuthCallbackQuery {
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubTokenResponse {
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubUser {
+    login: String,
+}
+
+async fn github_oauth_start() -> axum::response::Redirect {
+    let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
+    let redirect_uri = format!(
+        "{}/v1/auth/github/callback",
+        std::env::var("GREED_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into())
+    );
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user",
+        client_id, redirect_uri
+    );
+    axum::response::Redirect::temporary(&url)
+}
+
+async fn github_oauth_callback(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<OAuthCallbackQuery>,
+) -> axum::response::Redirect {
+    let frontend_url = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".into());
+
+    // Exchange code for access token
+    let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
+    let client_secret = std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default();
+
+    let token_res = match reqwest::Client::new()
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": query.code,
+        }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("GitHub token exchange failed: {}", e);
+            return axum::response::Redirect::temporary(
+                &format!("{}/auth/error?reason=github_error", frontend_url)
+            );
+        }
+    };
+
+    let token: GitHubTokenResponse = match token_res.json().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to parse GitHub token response: {}", e);
+            return axum::response::Redirect::temporary(
+                &format!("{}/auth/error?reason=github_error", frontend_url)
+            );
+        }
+    };
+
+    // Get GitHub user info
+    let user: GitHubUser = match reqwest::Client::new()
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {}", token.access_token))
+        .header("User-Agent", "greed-compute")
+        .send()
+        .await
+        .and_then(|r| Ok(r))
+    {
+        Ok(r) => match r.json().await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!("Failed to parse GitHub user: {}", e);
+                return axum::response::Redirect::temporary(
+                    &format!("{}/auth/error?reason=github_error", frontend_url)
+                );
+            }
+        },
+        Err(e) => {
+            tracing::error!("GitHub user API failed: {}", e);
+            return axum::response::Redirect::temporary(
+                &format!("{}/auth/error?reason=github_error", frontend_url)
+            );
+        }
+    };
+
+    // Find or create API key for this GitHub user
+    let api_key = state.db.find_or_create_key_for_github(&user.login);
+
+    tracing::info!(login = %user.login, "GitHub OAuth login");
+
+    // Redirect to frontend with key and login
+    axum::response::Redirect::temporary(
+        &format!("{}/dashboard?key={}&login={}", frontend_url, api_key, user.login)
+    )
 }
 
 async fn cuntext_fragment(Path(name): Path<String>) -> Response {

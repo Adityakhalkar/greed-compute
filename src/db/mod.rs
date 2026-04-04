@@ -327,6 +327,30 @@ impl Database {
         Ok(key)
     }
 
+    /// Find existing API key for a GitHub user, or create a new one.
+    pub fn find_or_create_key_for_github(&self, github_login: &str) -> String {
+        let conn = self.conn.lock().unwrap();
+
+        // Check if key already exists for this login (stored in name field)
+        let existing: Option<String> = conn.query_row(
+            "SELECT key FROM api_keys WHERE name = ?1 AND is_active = 1",
+            params![github_login],
+            |row| row.get(0),
+        ).ok();
+
+        if let Some(key) = existing {
+            return key;
+        }
+
+        // Create new key
+        let key = format!("gc_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let _ = conn.execute(
+            "INSERT INTO api_keys (key, name, tier, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![key, github_login, "free", Utc::now().to_rfc3339()],
+        );
+        key
+    }
+
     pub fn revoke_api_key(&self, key: &str) -> bool {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(

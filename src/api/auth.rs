@@ -38,6 +38,11 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
+    // GitHub OAuth — public, no auth
+    if path.starts_with("/v1/auth/") {
+        return Ok(next.run(request).await);
+    }
+
     // Admin endpoints — require GREED_ADMIN_KEY, not a regular API key
     if path.starts_with("/v1/admin/") {
         let admin_key = std::env::var("GREED_ADMIN_KEY").unwrap_or_default();
