@@ -1,37 +1,40 @@
-EXEC [run-code in a stateful session]
+EXEC [run code in a stateful session]
 deps=index.cuntext
 
-# Session = persistent Python interpreter. State survives across calls. TTL=15min, resets on use.
+# Session = persistent Python interpreter. State survives across calls.
+# Templates: blank, data-science, machine-learning, web-scraping
 
 session.create:
-  POST /sessions
-  body: {ttl_secs?:int}
-  → {session_id:str, expires_at:iso8601, workspace_path:str}
+  POST /session/create
+  body: {template?:str, ttl_seconds?:int, packages?:[str], checkpoint_id?:str}
+  → {session_id:str, created_at:iso8601, expires_at:iso8601, workspace_path:str}
 
 session.execute:
-  POST /sessions/{session_id}/execute
+  POST /session/{session_id}/execute
   body: {code:str}
-  → {stdout:str, result:any|null, error:str|null, plots:[str], duration_ms:int}
-  note: result=typed JSON (int/float/list/dict), not string repr
+  → {stdout:str, result:any|null, error:str|null, plots:[str], html:str|null, duration_ms:int}
+  note: result is typed JSON (int/float/list/dict). plots are base64 PNGs from plt.show()
+  note: 423 if session is already executing
 
 session.stream:
-  POST /sessions/{session_id}/execute/stream
+  POST /session/{session_id}/execute/stream
   body: {code:str}
-  → SSE stream of {type:"stdout"|"result"|"error", data:str}
-  note: use for long-running code, real-time output
+  → SSE stream, final event has {type:"result", stdout, error?, duration_ms, plots, html?}
+
+session.install:
+  POST /session/{session_id}/install
+  body: {packages:[str]}
+  → {stdout:str, error:str|null, duration_ms:int}
 
 session.status:
-  GET /sessions/{session_id}
-  → {active:bool, ttl_remaining:int, calls_used:int}
+  GET /session/{session_id}/status
+  → {active:bool, ttl_remaining:int, calls_used:int, session_id:str}
 
-session.close:
-  DELETE /sessions/{session_id}
-  → 204
+session.delete:
+  DELETE /session/{session_id}
+  → {deleted:true}
 
 ex:
-  # create
-  POST /sessions → {"session_id":"abc123","expires_at":"..."}
-  # run
-  POST /sessions/abc123/execute {"code":"x = 40 + 2"} → {"stdout":"","result":42}
-  # state persists
-  POST /sessions/abc123/execute {"code":"x * 2"} → {"result":84}
+  POST /session/create {"template":"data-science"} → {"session_id":"abc123"}
+  POST /session/abc123/execute {"code":"x = 40 + 2"} → {"result":42,"duration_ms":3}
+  POST /session/abc123/execute {"code":"x * 2"} → {"result":84,"duration_ms":1}

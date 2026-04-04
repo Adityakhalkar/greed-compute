@@ -5,29 +5,33 @@ deps=index.cuntext
                          fix: check body schema in relevant fragment
 
 401  unauthorized        missing or invalid X-API-Key header
-                         fix: set header X-API-Key: <your-key>
+                         fix: set header X-API-Key with valid key
 
-403  forbidden           action requires owner role (invite/delete workspace)
-                         fix: use owner's API key
+403  forbidden           action requires owner role (workspace invite/delete)
+                         fix: use the workspace owner's API key
 
-404  not-found           session expired, checkpoint deleted, or workspace not yours
-                         session-fix: create new session via POST /sessions
-                         checkpoint-fix: list via GET /checkpoints and restore valid one
-                         workspace-fix: list via GET /workspaces
+404  not-found           session expired, checkpoint deleted, or workspace not accessible
+                         session-fix: POST /session/create to make a new one
+                         checkpoint-fix: GET /checkpoints and use a valid ID
+                         workspace-fix: GET /workspaces to see what you have access to
 
-429  rate-limited        too many requests in 60s window
-                         body: {limit:int, window:"1m", plan:str, upgrade:url}
-                         fix: backoff and retry, or upgrade plan
+423  locked              session is already executing code
+                         fix: wait for current execution to finish, or use /execute/async
+
+429  rate-limited        too many requests in current window
+                         body: {limit:int, window:str, plan:str, upgrade:url}
+                         fix: exponential backoff (1s, 2s, 4s, 8s)
 
 507  storage-quota       checkpoint storage full for your plan
                          body: {used_mb:float, limit_mb:float}
-                         fix: delete old checkpoints or upgrade plan
+                         fix: DELETE /checkpoints/{old_id} to free space, or upgrade
 
-500  internal            worker process crashed or Python error
-                         body: {error:str}   # contains Python traceback
-                         fix: check code for syntax/runtime errors
+500  internal            worker process crashed or unhandled error
+                         body: {error:str} with Python traceback
+                         fix: check your code for syntax/runtime errors
 
-# Common patterns
-session-expired → re-create session, optionally restore from checkpoint
+# Common recovery patterns
+session-expired → POST /session/create, optionally restore from checkpoint
 rate-limited    → exponential backoff: 1s, 2s, 4s, 8s
 quota-exceeded  → GET /checkpoints, DELETE old ones, retry
+session-busy    → wait and retry, or use POST /session/{id}/execute/async

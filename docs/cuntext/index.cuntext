@@ -1,7 +1,7 @@
 GREED-COMPUTE v1
 base=https://compute.deep-ml.com/v1
 auth=header:X-API-Key
-auth-setup=POST /admin/keys {"name":"my-agent"} → {"key":"gc-..."}
+auth-setup=Sign in at https://greed-compute-ui.vercel.app/login (GitHub OAuth)
 format=json content-type=application/json
 
 # Load this file first (~200 tokens). Load fragments only for what you need.
@@ -15,16 +15,16 @@ goals:
   handle-errors             → fragments/errors.cuntext
 
 quick-ref:
-  session.create  POST /sessions
-  session.exec    POST /sessions/{id}/execute
-  session.stream  POST /sessions/{id}/execute/stream [SSE]
-  checkpoint      POST /sessions/{id}/checkpoint  body:{name:str}
-  restore         POST /checkpoints/{id}/restore
+  session.create  POST /session/create  body:{template?:str}
+  session.exec    POST /session/{id}/execute  body:{code:str}
+  session.stream  POST /session/{id}/execute/stream [SSE]
+  checkpoint      POST /session/{id}/checkpoint  body:{name?:str}
+  restore         POST /session/{id}/restore/{ckpt_id}
   swarm           POST /swarm
   workspace       POST /workspaces
   ws.exec         POST /workspaces/{id}/execute
   usage           GET  /usage
 
-tiers: free(60rpm,500MB,7d) pro(600rpm,5GB,30d) enterprise(unlimited)
-on-error: 401=bad-key 404=session-expired(recreate) 429=rate-limited(backoff) 507=storage-full
+tiers: free(60rpm,100exec/day,500MB,7d) pro(300rpm,10000exec/day,5GB,30d) enterprise(unlimited)
+on-error: 401=bad-key 404=session-expired(recreate) 423=session-busy 429=rate-limited(backoff) 507=storage-full
 errors: → fragments/errors.cuntext
