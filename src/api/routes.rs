@@ -672,8 +672,14 @@ async fn cuntext_index() -> Response {
 // ── GitHub OAuth ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+struct OAuthStartQuery {
+    redirect_uri: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct OAuthCallbackQuery {
     code: String,
+    state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -686,15 +692,22 @@ struct GitHubUser {
     login: String,
 }
 
-async fn github_oauth_start() -> axum::response::Redirect {
+async fn github_oauth_start(
+    axum::extract::Query(query): axum::extract::Query<OAuthStartQuery>,
+) -> axum::response::Redirect {
     let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
-    let redirect_uri = format!(
+    let callback = format!(
         "{}/v1/auth/github/callback",
         std::env::var("GREED_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into())
     );
+
+    // If a CLI redirect_uri is provided, pass it as the OAuth state parameter
+    // so we can redirect back to the CLI after auth
+    let state_param = query.redirect_uri.unwrap_or_default();
+
     let url = format!(
-        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user",
-        client_id, redirect_uri
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user&state={}",
+        client_id, callback, state_param
     );
     axum::response::Redirect::temporary(&url)
 }
@@ -706,7 +719,6 @@ async fn github_oauth_callback(
     let frontend_url = std::env::var("FRONTEND_URL")
         .unwrap_or_else(|_| "http://localhost:3000".into());
 
-    // Exchange code for access token
     let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
     let client_secret = std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default();
 
@@ -740,14 +752,12 @@ async fn github_oauth_callback(
         }
     };
 
-    // Get GitHub user info
     let user: GitHubUser = match reqwest::Client::new()
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {}", token.access_token))
         .header("User-Agent", "greed-compute")
         .send()
         .await
-        .and_then(|r| Ok(r))
     {
         Ok(r) => match r.json().await {
             Ok(u) => u,
@@ -766,14 +776,19 @@ async fn github_oauth_callback(
         }
     };
 
-    // Find or create API key for this GitHub user
     let api_key = state.db.find_or_create_key_for_github(&user.login);
-
     tracing::info!(login = %user.login, "GitHub OAuth login");
 
-    // Redirect to frontend with key and login
+    // If state contains a CLI redirect_uri (starts with http://localhost), redirect there
+    // Otherwise redirect to the frontend dashboard
+    let redirect_base = match &query.state {
+        Some(s) if s.starts_with("http://localhost") => s.to_string(),
+        _ => format!("{}/dashboard", frontend_url),
+    };
+
+    let separator = if redirect_base.contains('?') { '&' } else { '?' };
     axum::response::Redirect::temporary(
-        &format!("{}/dashboard?key={}&login={}", frontend_url, api_key, user.login)
+        &format!("{}{}key={}&login={}", redirect_base, separator, api_key, user.login)
     )
 }
 
