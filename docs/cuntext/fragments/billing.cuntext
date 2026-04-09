@@ -1,0 +1,30 @@
+BILLING [usage, limits, plan upgrades]
+deps=index.cuntext
+
+usage.get:
+  GET /usage
+  query: {date?:YYYY-MM-DD}
+  → {plan:str, billing_status:str, date:str,
+     usage:{executions:{used,limit,remaining}, swarms:{used,limit,remaining},
+            total_compute_ms:int, checkpoint_storage_used_mb:int,
+            checkpoint_storage_limit_mb:int, checkpoint_retention_days:int},
+     limits:{requests_per_minute:int, executions_per_day:int|null,
+             concurrent_sessions:int, max_execution_secs:int}}
+
+tiers:
+  free:       60rpm  | 100 exec/day | 3 sessions  | 500MB  | 7d retention  | $0
+  pro:        300rpm | 10k exec/day | 50 sessions  | 5GB    | 30d retention | pay-as-you-go
+  enterprise: unlimited             | 500 sessions | 50GB   | 90d retention | custom
+
+billing.checkout:
+  POST /billing/checkout
+  body: {plan:"pro"|"enterprise", email?:str, success_url?:str, cancel_url?:str}
+  → {checkout_url:str, plan:str}
+
+billing.portal:
+  POST /billing/portal
+  body: {return_url?:str}
+  → {portal_url:str}
+
+rate-limit: 429 {error, limit, window, plan, upgrade}
+quota-full: 507 {error, used_mb, limit_mb}

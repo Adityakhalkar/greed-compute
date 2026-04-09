@@ -1,0 +1,34 @@
+CHECKPOINT [save and restore Python interpreter state]
+deps=index.cuntext exec.cuntext
+
+# Checkpoint = serialized interpreter state (dill). All variables, imports, loaded models.
+# Auto-saved on session expiry if under storage quota.
+
+checkpoint.create:
+  POST /session/{session_id}/checkpoint
+  body: {name?:str}
+  → {checkpoint_id:str, name:str, size_bytes:int, expires_in_days:int, storage_used_mb:float, storage_limit_mb:float}
+  note: 507 if storage quota exceeded
+
+checkpoint.restore:
+  POST /session/{session_id}/restore/{checkpoint_id}
+  → {restored:bool, vars:[str], error?:str}
+  note: loads checkpoint into an existing running session
+
+checkpoint.list:
+  GET /checkpoints
+  → [{id, name, created_at, size_bytes, expires_in_days}]
+
+checkpoint.delete:
+  DELETE /checkpoints/{checkpoint_id}
+  → {deleted:true}
+
+retention: free=7d pro=30d enterprise=90d
+quota:     free=500MB pro=5GB enterprise=50GB
+quota-err: 507 {"error":"storage_quota_exceeded","used_mb":N,"limit_mb":N}
+
+ex:
+  POST /session/abc123/checkpoint {"name":"model-loaded"}
+  → {"checkpoint_id":"ckpt_xyz","size_bytes":142000}
+  POST /session/new123/restore/ckpt_xyz
+  → {"restored":true,"vars":["model","tokenizer","config"]}

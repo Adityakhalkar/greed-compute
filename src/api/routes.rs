@@ -1,16 +1,15 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{sse::{Event, Sse}, Redirect},
+    response::sse::{Event, Sse},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, convert::Infallible, sync::Arc};
+use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
-use crate::db::AuthError;
 use crate::AppState;
 
 static WEBHOOK_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -20,10 +19,6 @@ fn webhook_client() -> &'static reqwest::Client {
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/auth/github", get(github_oauth_redirect))
-        .route("/auth/github/callback", get(github_oauth_callback))
-        .route("/auth/register", post(register))
-        .route("/auth/login", post(login))
         .route("/health", get(health))
         .route("/session/create", post(create_session))
         .route("/session/{id}", delete(terminate_session))
@@ -40,24 +35,46 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/checkpoints/{id}", delete(delete_checkpoint))
         .route("/session/{id}/files", post(upload_file))
         .route("/session/{id}/output/{filename}", get(read_file))
-        .route("/usage", get(get_usage))
         .route("/admin/keys", post(create_api_key))
         .route("/admin/keys", get(list_api_keys))
         .route("/admin/keys/{key}/revoke", post(revoke_api_key))
         .route("/swarm", post(crate::api::swarm::create_swarm))
         .route("/swarm/{id}", get(crate::api::swarm::get_swarm))
         .route("/mcp", post(crate::api::mcp::mcp_handler))
+        // ── Enterprise billing ─────────────────────────────────────────────
+        .route("/billing/checkout", post(crate::api::billing::create_checkout))
+        .route("/billing/portal", post(crate::api::billing::create_portal))
+        .route("/billing/webhook", post(crate::api::billing::stripe_webhook))
+        .route("/usage", get(crate::api::billing::get_usage))
+        // ── SAW: Shared Agent Workspaces ───────────────────────────────────
+        .route("/workspaces", post(crate::api::workspace::create_workspace))
+        .route("/workspaces", get(crate::api::workspace::list_workspaces))
+        .route("/workspaces/{id}", get(crate::api::workspace::get_workspace))
+        .route("/workspaces/{id}", delete(crate::api::workspace::delete_workspace))
+        .route("/workspaces/{id}/execute", post(crate::api::workspace::execute_in_workspace))
+        .route("/workspaces/{id}/invite", post(crate::api::workspace::invite_member))
+        .route("/workspaces/{id}/members/{member_key}", delete(crate::api::workspace::kick_member))
+        // ── cuntext: LLM-native API discovery ─────────────────────────────
+        .route("/cuntext/index.cuntext", get(cuntext_index))
+        .route("/cuntext/fragments/{name}", get(cuntext_fragment))
+        .route("/llms.cuntext", get(cuntext_index))
+        // ── GitHub OAuth ──────────────────────────────────────────────
+        .route("/auth/github", get(github_oauth_start))
+        .route("/auth/github/callback", get(github_oauth_callback))
 }
 
 // ── Health ──────────────────────────────────────────────
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let pool_size = state.sessions.warm_pool_size().await;
+    let template_pools = state.sessions.template_pool_sizes().await;
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "active_sessions": state.sessions.active_session_count(),
         "warm_pool": pool_size,
+        "template_pools": template_pools,
+        "templates": ["data-science", "machine-learning", "web-scraping", "blank"],
     }))
 }
 
@@ -66,6 +83,8 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct CreateSessionRequest {
     ttl_seconds: Option<i64>,
+    /// Pre-built template: "data-science", "machine-learning", "web-scraping", "blank"
+    template: Option<String>,
     /// Packages to pip install before the session is ready
     packages: Option<Vec<String>>,
     /// Restore a saved checkpoint into the new session immediately
@@ -77,7 +96,12 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let session = match state.sessions.create_session(body.ttl_seconds).await {
+    use crate::sandbox::SessionTemplate;
+    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let template = body.template.as_deref()
+        .and_then(SessionTemplate::from_str)
+        .unwrap_or(SessionTemplate::Blank);
+    let session = match state.sessions.create_session_for_key(body.ttl_seconds, api_key, Some(template)).await {
         Ok(info) => info,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create session");
@@ -187,6 +211,7 @@ struct ExecuteResponse {
 async fn execute_code(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ExecuteRequest>,
 ) -> Result<Json<ExecuteResponse>, StatusCode> {
     let session = state
@@ -202,6 +227,11 @@ async fn execute_code(
     // Renew TTL on every execute — keeps active notebook sessions alive
     session.touch();
 
+    // Record usage event
+    if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        state.db.record_usage_event(key, "execute", Some(&id), None, result.duration_ms as i64);
+    }
+
     Ok(Json(ExecuteResponse {
         stdout: result.stdout,
         result: result.result,
@@ -215,6 +245,7 @@ async fn execute_code(
 async fn execute_code_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<ExecuteRequest>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -228,11 +259,18 @@ async fn execute_code_stream(
 
     let session_clone = session.clone();
     let code = body.code.clone();
+    let state_clone = state.clone();
+    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let session_id = id.clone();
 
     tokio::spawn(async move {
         let mut runtime = session_clone.runtime.lock().await;
         let result = runtime.execute_streaming(&code, tx.clone()).await;
         session_clone.touch();
+        // Record usage
+        if let Some(key) = api_key {
+            state_clone.db.record_usage_event(&key, "stream_execute", Some(&session_id), None, result.duration_ms as i64);
+        }
         // Send the final result as the last SSE event
         let final_json = serde_json::json!({
             "type": "result",
@@ -392,8 +430,27 @@ async fn create_checkpoint(
     headers: HeaderMap,
     Json(body): Json<CreateCheckpointRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    use crate::billing::PlanLimits;
+
     let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // ── Storage quota check ───────────────────────────────────────────────────
+    let key_info = state.db.validate_api_key(&api_key).ok_or(StatusCode::UNAUTHORIZED)?;
+    let limits = PlanLimits::for_tier(&key_info.tier);
+    let used = state.db.checkpoint_storage_used(&api_key);
+    if used >= limits.checkpoint_storage_bytes {
+        let used_mb = used / (1024 * 1024);
+        let limit_mb = limits.checkpoint_storage_bytes / (1024 * 1024);
+        return Ok(Json(serde_json::json!({
+            "error": "Checkpoint storage quota exceeded",
+            "used_mb": used_mb,
+            "limit_mb": limit_mb,
+            "plan": key_info.tier,
+            "fix": "Delete old checkpoints or upgrade your plan",
+            "upgrade": "https://compute.deep-ml.com/billing"
+        })));
+    }
 
     let checkpoint_id = uuid::Uuid::new_v4().to_string();
     let name = body.name.unwrap_or_else(|| format!("checkpoint-{}", &checkpoint_id[..8]));
@@ -413,10 +470,14 @@ async fn create_checkpoint(
     state.db.create_checkpoint_record(&checkpoint_id, &api_key, &name, &path_str, size_bytes as i64)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let retention_days = limits.checkpoint_retention_days;
     Ok(Json(serde_json::json!({
         "checkpoint_id": checkpoint_id,
         "name": name,
         "size_bytes": size_bytes,
+        "expires_in_days": retention_days,
+        "storage_used_mb": (used + size_bytes) / (1024 * 1024),
+        "storage_limit_mb": limits.checkpoint_storage_bytes / (1024 * 1024),
     })))
 }
 
@@ -555,46 +616,6 @@ struct CreateKeyRequest {
     tier: Option<String>,
 }
 
-// ── Usage ────────────────────────────────────────────────
-
-async fn get_usage(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Json<serde_json::Value> {
-    let key = headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let key_info = state.db.validate_api_key(key);
-    let tier = key_info.as_ref().map(|k| k.tier.as_str()).unwrap_or("free");
-
-    let (req_limit, storage_limit_mb, retention_days): (i64, i64, i64) = match tier {
-        "pro"        => (i64::MAX, 5120, 30),
-        "enterprise" => (i64::MAX, i64::MAX, 365),
-        _            => (100, 50, 1),
-    };
-
-    let used_today   = state.db.get_usage_today(key);
-    let storage_bytes = state.db.get_checkpoint_storage_bytes(key);
-    let storage_mb   = storage_bytes / (1024 * 1024);
-
-    Json(serde_json::json!({
-        "plan": tier,
-        "requests": {
-            "used": used_today,
-            "limit": req_limit,
-            "remaining": (req_limit - used_today).max(0)
-        },
-        "storage": {
-            "used_mb": storage_mb,
-            "limit_mb": storage_limit_mb,
-            "remaining_mb": (storage_limit_mb - storage_mb).max(0)
-        },
-        "checkpoint_retention_days": retention_days
-    }))
-}
-
 async fn create_api_key(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateKeyRequest>,
@@ -633,170 +654,169 @@ async fn revoke_api_key(
     }
 }
 
-// ── Auth ─────────────────────────────────────────────────
+// ── cuntext handlers ──────────────────────────────────────────────────────────
+
+use axum::response::Response;
+use axum::http::header;
+
+const CUNTEXT_INDEX: &str = include_str!("../../docs/cuntext/index.cuntext");
+
+async fn cuntext_index() -> Response {
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(axum::body::Body::from(CUNTEXT_INDEX))
+        .unwrap()
+}
+
+// ── GitHub OAuth ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct AuthRequest {
-    email: String,
-    password: String,
+struct OAuthStartQuery {
+    redirect_uri: Option<String>,
 }
 
-async fn register(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<AuthRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if body.email.is_empty() || !body.email.contains('@') {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid email" })));
-    }
-    if body.password.len() < 8 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Password must be at least 8 characters" })));
-    }
-
-    match state.db.register_user(&body.email, &body.password) {
-        Ok(api_key) => (StatusCode::CREATED, Json(serde_json::json!({
-            "api_key": api_key,
-            "email": body.email,
-            "plan": "free",
-            "message": "Account created. Save your API key — it won't be shown again."
-        }))),
-        Err(AuthError::EmailTaken) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "Email already registered" })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "Registration failed" })),
-        ),
-    }
+#[derive(Deserialize)]
+struct OAuthCallbackQuery {
+    code: String,
+    state: Option<String>,
 }
 
-async fn login(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<AuthRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.db.login_user(&body.email, &body.password) {
-        Ok(api_key) => (StatusCode::OK, Json(serde_json::json!({
-            "api_key": api_key,
-            "email": body.email,
-        }))),
-        Err(AuthError::InvalidCredentials) => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "Invalid email or password" })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": "Login failed" })),
-        ),
-    }
+#[derive(Deserialize)]
+struct GitHubTokenResponse {
+    access_token: String,
 }
 
-// ── GitHub OAuth ──────────────────────────────────────────
+#[derive(Deserialize)]
+struct GitHubUser {
+    login: String,
+}
 
-async fn github_oauth_redirect() -> Redirect {
+async fn github_oauth_start(
+    axum::extract::Query(query): axum::extract::Query<OAuthStartQuery>,
+) -> axum::response::Redirect {
     let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
-    let url = format!(
-        "https://github.com/login/oauth/authorize?client_id={}&scope=user:email",
-        client_id
+    let callback = format!(
+        "{}/v1/auth/github/callback",
+        std::env::var("GREED_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into())
     );
-    Redirect::to(&url)
+
+    // If a CLI redirect_uri is provided, pass it as the OAuth state parameter
+    // so we can redirect back to the CLI after auth
+    let state_param = query.redirect_uri.unwrap_or_default();
+
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user&state={}",
+        client_id, callback, state_param
+    );
+    axum::response::Redirect::temporary(&url)
 }
 
 async fn github_oauth_callback(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Redirect, (StatusCode, Json<serde_json::Value>)> {
-    let code = params.get("code").cloned().unwrap_or_default();
-    if code.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing code"}))));
-    }
+    axum::extract::Query(query): axum::extract::Query<OAuthCallbackQuery>,
+) -> axum::response::Redirect {
+    let frontend_url = std::env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".into());
 
-    let client_id     = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
+    let client_id = std::env::var("GITHUB_CLIENT_ID").unwrap_or_default();
     let client_secret = std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default();
-    let frontend_url  = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "https://greed-compute-ui.vercel.app".to_string());
 
-    let http = webhook_client();
-
-    // Exchange code for access token
-    let token_resp = http
+    let token_res = match reqwest::Client::new()
         .post("https://github.com/login/oauth/access_token")
         .header("Accept", "application/json")
         .json(&serde_json::json!({
             "client_id": client_id,
             "client_secret": client_secret,
-            "code": code,
+            "code": query.code,
         }))
         .send()
         .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "GitHub unreachable"}))))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("GitHub token exchange failed: {}", e);
+            return axum::response::Redirect::temporary(
+                &format!("{}/auth/error?reason=github_error", frontend_url)
+            );
+        }
+    };
 
-    let token_json: serde_json::Value = token_resp.json().await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Bad token response"}))))?;
+    let token: GitHubTokenResponse = match token_res.json().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to parse GitHub token response: {}", e);
+            return axum::response::Redirect::temporary(
+                &format!("{}/auth/error?reason=github_error", frontend_url)
+            );
+        }
+    };
 
-    let access_token = token_json["access_token"].as_str()
-        .unwrap_or("")
-        .to_string();
-    if access_token.is_empty() {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "GitHub auth failed"}))));
-    }
-
-    // Fetch GitHub user info
-    let user_resp = http
+    let user: GitHubUser = match reqwest::Client::new()
         .get("https://api.github.com/user")
-        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Authorization", format!("Bearer {}", token.access_token))
         .header("User-Agent", "greed-compute")
         .send()
         .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "GitHub API unreachable"}))))?;
-
-    let user_json: serde_json::Value = user_resp.json().await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": "Bad user response"}))))?;
-
-    let github_id    = user_json["id"].as_i64().map(|n| n.to_string()).unwrap_or_default();
-    let github_login = user_json["login"].as_str().unwrap_or("unknown").to_string();
-
-    // Check account age — block accounts < 30 days old
-    if let Some(created_at) = user_json["created_at"].as_str() {
-        if let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_at) {
-            let age_days = (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_days();
-            if age_days < 30 {
-                let redirect = format!("{}/auth/error?reason=account_too_new", frontend_url);
-                return Ok(Redirect::to(&redirect));
+    {
+        Ok(r) => match r.json().await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!("Failed to parse GitHub user: {}", e);
+                return axum::response::Redirect::temporary(
+                    &format!("{}/auth/error?reason=github_error", frontend_url)
+                );
             }
+        },
+        Err(e) => {
+            tracing::error!("GitHub user API failed: {}", e);
+            return axum::response::Redirect::temporary(
+                &format!("{}/auth/error?reason=github_error", frontend_url)
+            );
         }
-    }
-
-    // Fetch primary email
-    let email_resp = http
-        .get("https://api.github.com/user/emails")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("User-Agent", "greed-compute")
-        .send()
-        .await;
-
-    let email = if let Ok(resp) = email_resp {
-        let emails: serde_json::Value = resp.json().await.unwrap_or_default();
-        emails.as_array()
-            .and_then(|arr| arr.iter().find(|e| e["primary"].as_bool() == Some(true)))
-            .and_then(|e| e["email"].as_str())
-            .unwrap_or(&github_login)
-            .to_string()
-    } else {
-        github_login.clone()
     };
 
-    // Upsert user
-    match state.db.upsert_github_user(&github_id, &github_login, &email) {
-        Ok((api_key, _is_new)) => {
-            let redirect = format!(
-                "{}/dashboard?key={}&login={}",
-                frontend_url, api_key, github_login
-            );
-            Ok(Redirect::to(&redirect))
-        }
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Failed to create account"})),
-        )),
+    let api_key = state.db.find_or_create_key_for_github(&user.login);
+    tracing::info!(login = %user.login, "GitHub OAuth login");
+
+    // If state contains a CLI redirect_uri (starts with http://localhost), redirect there
+    // Otherwise redirect to the frontend dashboard
+    let redirect_base = match &query.state {
+        Some(s) if s.starts_with("http://localhost") => s.to_string(),
+        _ => format!("{}/dashboard", frontend_url),
+    };
+
+    let separator = if redirect_base.contains('?') { '&' } else { '?' };
+    axum::response::Redirect::temporary(
+        &format!("{}{}key={}&login={}", redirect_base, separator, api_key, user.login)
+    )
+}
+
+async fn cuntext_fragment(Path(name): Path<String>) -> Response {
+    if name.contains('/') || name.contains("..") || !name.ends_with(".cuntext") {
+        return axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("not found"))
+            .unwrap();
+    }
+    let content: Option<&'static str> = match name.as_str() {
+        "exec.cuntext"        => Some(include_str!("../../docs/cuntext/fragments/exec.cuntext")),
+        "checkpoint.cuntext"  => Some(include_str!("../../docs/cuntext/fragments/checkpoint.cuntext")),
+        "swarm.cuntext"       => Some(include_str!("../../docs/cuntext/fragments/swarm.cuntext")),
+        "workspace.cuntext"   => Some(include_str!("../../docs/cuntext/fragments/workspace.cuntext")),
+        "billing.cuntext"     => Some(include_str!("../../docs/cuntext/fragments/billing.cuntext")),
+        "errors.cuntext"      => Some(include_str!("../../docs/cuntext/fragments/errors.cuntext")),
+        _ => None,
+    };
+    match content {
+        Some(body) => axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(header::CACHE_CONTROL, "public, max-age=3600")
+            .body(axum::body::Body::from(body))
+            .unwrap(),
+        None => axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("not found"))
+            .unwrap(),
     }
 }

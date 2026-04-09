@@ -1,0 +1,34 @@
+SWARM [parallel map-reduce across workers]
+deps=index.cuntext exec.cuntext
+
+# Swarm = run setup once, clone state to N workers, each processes a partition, reduce results.
+# template_code runs once and is cloned (not re-executed) to all workers.
+
+swarm.create:
+  POST /swarm
+  body: {
+    template_code?:str,  # setup code, runs once, cloned to all workers
+    map_fn:str,          # code each worker runs, has access to `partition` variable
+    data:[any],          # one item per worker, injected as `partition`
+    reduce_fn?:str,      # combines results, has access to `results` list
+    webhook_url?:str     # POST result here when done
+  }
+  → {swarm_id:str, status:"running", total_workers:int, template_cloning:bool}
+
+swarm.get:
+  GET /swarm/{swarm_id}
+  → {swarm_id, status:"running"|"done"|"partial", total_workers:int,
+     completed_workers:int, failed_workers:int,
+     reduce_result?:any, reduce_stdout?:str, reduce_error?:str,
+     workers:[{id, worker_index:int, status, result?, stdout, error?, duration_ms?}]}
+
+ex:
+  POST /swarm {
+    "template_code": "import numpy as np",
+    "map_fn": "result = np.sum(partition)",
+    "data": [[1,2,3],[4,5,6],[7,8,9]],
+    "reduce_fn": "total = sum(results)"
+  }
+  → {"swarm_id":"sw_abc","status":"running","total_workers":3}
+  GET /swarm/sw_abc
+  → {"status":"done","reduce_result":45,"workers":[...]}

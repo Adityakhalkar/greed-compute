@@ -2,13 +2,6 @@ use rusqlite::{Connection, params};
 use std::sync::Mutex;
 use chrono::Utc;
 
-#[derive(Debug)]
-pub enum AuthError {
-    EmailTaken,
-    InvalidCredentials,
-    Internal,
-}
-
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -110,24 +103,70 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_swarms_key ON swarms(api_key);
             CREATE INDEX IF NOT EXISTS idx_swarm_workers_swarm ON swarm_workers(swarm_id);
 
-            CREATE TABLE IF NOT EXISTS users (
+            -- SAW: Shared Agent Workspaces
+            CREATE TABLE IF NOT EXISTS workspaces (
                 id TEXT PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                api_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                owner_api_key TEXT NOT NULL,
+                checkpoint_path TEXT,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (api_key) REFERENCES api_keys(key)
+                last_accessed_at TEXT NOT NULL
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);"
+            CREATE TABLE IF NOT EXISTS workspace_members (
+                workspace_id TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (workspace_id, api_key),
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_api_key);
+            CREATE INDEX IF NOT EXISTS idx_workspace_members_key ON workspace_members(api_key);
+
+            -- Enterprise: detailed per-event usage tracking
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                session_id TEXT,
+                swarm_id TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Enterprise: daily aggregated counters (fast limit checks)
+            CREATE TABLE IF NOT EXISTS daily_usage (
+                api_key TEXT NOT NULL,
+                date TEXT NOT NULL,
+                exec_count INTEGER NOT NULL DEFAULT 0,
+                total_duration_ms INTEGER NOT NULL DEFAULT 0,
+                swarm_count INTEGER NOT NULL DEFAULT 0,
+                install_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (api_key, date)
+            );
+
+            -- Enterprise: Stripe customer mapping
+            CREATE TABLE IF NOT EXISTS stripe_customers (
+                api_key TEXT PRIMARY KEY,
+                stripe_customer_id TEXT NOT NULL,
+                stripe_subscription_id TEXT,
+                plan TEXT NOT NULL DEFAULT 'free',
+                status TEXT NOT NULL DEFAULT 'active',
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_usage_events_key ON usage_events(api_key);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_daily_usage_key ON daily_usage(api_key);
+            "
         )?;
 
-        // Migration: add GitHub columns (ignore errors — columns may already exist)
-        let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN github_user_id TEXT;");
-        let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN github_login TEXT;");
-        let _ = conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users(github_user_id);"
-        );
+        // Additive column migrations — ALTER TABLE errors are silently ignored
+        // because the column may already exist from a previous migration run.
+        let _ = conn.execute_batch("ALTER TABLE api_keys ADD COLUMN stripe_customer_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE api_keys ADD COLUMN stripe_subscription_id TEXT;");
 
         Ok(())
     }
@@ -156,30 +195,124 @@ impl Database {
         );
     }
 
+    // ── Enterprise: usage events ─────────────────────────────────────────────
+
+    pub fn record_usage_event(
+        &self,
+        api_key: &str,
+        event_type: &str,
+        session_id: Option<&str>,
+        swarm_id: Option<&str>,
+        duration_ms: i64,
+    ) {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO usage_events (api_key, event_type, session_id, swarm_id, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![api_key, event_type, session_id, swarm_id, duration_ms],
+        );
+        // Upsert daily aggregation
+        let _ = conn.execute(
+            "INSERT INTO daily_usage (api_key, date, exec_count, total_duration_ms, swarm_count, install_count)
+             VALUES (?1, ?2,
+                 CASE WHEN ?3 IN ('execute','stream_execute','async_execute') THEN 1 ELSE 0 END,
+                 ?4,
+                 CASE WHEN ?3 = 'swarm' THEN 1 ELSE 0 END,
+                 CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END
+             )
+             ON CONFLICT(api_key, date) DO UPDATE SET
+                 exec_count = exec_count + CASE WHEN ?3 IN ('execute','stream_execute','async_execute') THEN 1 ELSE 0 END,
+                 total_duration_ms = total_duration_ms + ?4,
+                 swarm_count = swarm_count + CASE WHEN ?3 = 'swarm' THEN 1 ELSE 0 END,
+                 install_count = install_count + CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END",
+            params![api_key, today, event_type, duration_ms],
+        );
+    }
+
+    pub fn get_daily_usage(&self, api_key: &str, date: &str) -> DailyUsage {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT exec_count, total_duration_ms, swarm_count, install_count
+             FROM daily_usage WHERE api_key = ?1 AND date = ?2",
+            params![api_key, date],
+            |row| Ok(DailyUsage {
+                exec_count: row.get(0)?,
+                total_duration_ms: row.get(1)?,
+                swarm_count: row.get(2)?,
+                install_count: row.get(3)?,
+            }),
+        ).unwrap_or_default()
+    }
+
+    // ── Enterprise: Stripe ───────────────────────────────────────────────────
+
+    pub fn upsert_stripe_customer(
+        &self,
+        api_key: &str,
+        stripe_customer_id: &str,
+        stripe_subscription_id: Option<&str>,
+        plan: &str,
+        status: &str,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO stripe_customers (api_key, stripe_customer_id, stripe_subscription_id, plan, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(api_key) DO UPDATE SET
+                 stripe_customer_id = ?2,
+                 stripe_subscription_id = ?3,
+                 plan = ?4,
+                 status = ?5,
+                 updated_at = datetime('now')",
+            params![api_key, stripe_customer_id, stripe_subscription_id, plan, status],
+        );
+        // Also upgrade the api_key tier
+        let _ = conn.execute(
+            "UPDATE api_keys SET tier = ?1 WHERE key = ?2",
+            params![plan, api_key],
+        );
+    }
+
+    pub fn get_stripe_customer(&self, api_key: &str) -> Option<StripeCustomer> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT api_key, stripe_customer_id, stripe_subscription_id, plan, status, updated_at
+             FROM stripe_customers WHERE api_key = ?1",
+            params![api_key],
+            |row| Ok(StripeCustomer {
+                api_key: row.get(0)?,
+                stripe_customer_id: row.get(1)?,
+                stripe_subscription_id: row.get(2)?,
+                plan: row.get(3)?,
+                status: row.get(4)?,
+                updated_at: row.get(5)?,
+            }),
+        ).ok()
+    }
+
+    pub fn get_stripe_customer_by_stripe_id(&self, stripe_customer_id: &str) -> Option<StripeCustomer> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT api_key, stripe_customer_id, stripe_subscription_id, plan, status, updated_at
+             FROM stripe_customers WHERE stripe_customer_id = ?1",
+            params![stripe_customer_id],
+            |row| Ok(StripeCustomer {
+                api_key: row.get(0)?,
+                stripe_customer_id: row.get(1)?,
+                stripe_subscription_id: row.get(2)?,
+                plan: row.get(3)?,
+                status: row.get(4)?,
+                updated_at: row.get(5)?,
+            }),
+        ).ok()
+    }
+
     pub fn get_usage_count(&self, api_key: &str, since: &str) -> i64 {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT COUNT(*) FROM usage WHERE api_key = ?1 AND timestamp >= ?2",
             params![api_key, since],
-            |row| row.get(0),
-        ).unwrap_or(0)
-    }
-
-    pub fn get_usage_today(&self, api_key: &str) -> i64 {
-        let since = chrono::Utc::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .to_rfc3339();
-        self.get_usage_count(api_key, &since)
-    }
-
-    pub fn get_checkpoint_storage_bytes(&self, api_key: &str) -> i64 {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM checkpoints WHERE api_key = ?1",
-            params![api_key],
             |row| row.get(0),
         ).unwrap_or(0)
     }
@@ -192,6 +325,30 @@ impl Database {
             params![key, name, tier, Utc::now().to_rfc3339()],
         )?;
         Ok(key)
+    }
+
+    /// Find existing API key for a GitHub user, or create a new one.
+    pub fn find_or_create_key_for_github(&self, github_login: &str) -> String {
+        let conn = self.conn.lock().unwrap();
+
+        // Check if key already exists for this login (stored in name field)
+        let existing: Option<String> = conn.query_row(
+            "SELECT key FROM api_keys WHERE name = ?1 AND is_active = 1",
+            params![github_login],
+            |row| row.get(0),
+        ).ok();
+
+        if let Some(key) = existing {
+            return key;
+        }
+
+        // Create new key
+        let key = format!("gc_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let _ = conn.execute(
+            "INSERT INTO api_keys (key, name, tier, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![key, github_login, "free", Utc::now().to_rfc3339()],
+        );
+        key
     }
 
     pub fn revoke_api_key(&self, key: &str) -> bool {
@@ -285,6 +442,38 @@ impl Database {
         )
         .map(|rows| rows > 0)
         .unwrap_or(false)
+    }
+
+    /// Total bytes used by all checkpoints for this API key.
+    pub fn checkpoint_storage_used(&self, api_key: &str) -> u64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM checkpoints WHERE api_key = ?1",
+            params![api_key],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) as u64
+    }
+
+    /// Return all checkpoints older than `retention_days` days, across all keys,
+    /// grouped with their paths so the caller can delete the files.
+    pub fn list_expired_checkpoints(&self, retention_days: u32) -> Vec<(String, String, String)> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = format!("-{} days", retention_days);
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.api_key, c.path FROM checkpoints c
+             JOIN api_keys k ON c.api_key = k.key
+             WHERE c.created_at < datetime('now', ?1)
+             ORDER BY c.created_at ASC"
+        ).unwrap();
+        stmt.query_map(params![cutoff], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
+    /// Delete checkpoint record by id only (used by retention cleanup — no key check).
+    pub fn delete_checkpoint_by_id(&self, id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM checkpoints WHERE id = ?1", params![id]);
     }
 
     // ── Jobs CRUD ────────────────────────────────────────────────────────────
@@ -459,96 +648,118 @@ impl Database {
         }).unwrap().filter_map(|r| r.ok()).collect()
     }
 
-    // ── User Auth ────────────────────────────────────────────────────────────
+    // ── Workspace CRUD ────────────────────────────────────────────────────────
 
-    /// Find or create a user from GitHub OAuth. Returns (api_key, is_new).
-    pub fn upsert_github_user(
-        &self,
-        github_user_id: &str,
-        github_login: &str,
-        email: &str,
-    ) -> Result<(String, bool), AuthError> {
-        // Check if user already exists by github_user_id
-        {
-            let conn = self.conn.lock().unwrap();
-            let existing: Option<String> = conn.query_row(
-                "SELECT api_key FROM users WHERE github_user_id = ?1",
-                params![github_user_id],
-                |row| row.get(0),
-            ).ok();
-            if let Some(api_key) = existing {
-                return Ok((api_key, false));
-            }
-        }
-
-        // New user — create api_key + user record
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let api_key = format!("gc_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
-        let now = Utc::now().to_rfc3339();
-
+    pub fn create_workspace(&self, id: &str, name: &str, owner_api_key: &str) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO api_keys (key, name, tier, created_at) VALUES (?1, ?2, 'free', ?3)",
-            params![api_key, github_login, now],
-        ).map_err(|_| AuthError::Internal)?;
+            "INSERT INTO workspaces (id, name, owner_api_key, created_at, last_accessed_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, name, owner_api_key, now],
+        )?;
+        // Owner is also a member
         conn.execute(
-            "INSERT INTO users (id, email, password_hash, github_user_id, github_login, api_key, created_at)
-             VALUES (?1, ?2, '', ?3, ?4, ?5, ?6)",
-            params![user_id, email, github_user_id, github_login, api_key, now],
-        ).map_err(|_| AuthError::Internal)?;
-
-        Ok((api_key, true))
+            "INSERT INTO workspace_members (workspace_id, api_key, role, added_at) VALUES (?1, ?2, 'owner', ?3)",
+            params![id, owner_api_key, now],
+        )?;
+        Ok(())
     }
 
-    pub fn register_user(&self, email: &str, password: &str) -> Result<String, AuthError> {
-        // Check if email already taken
-        {
-            let conn = self.conn.lock().unwrap();
-            let exists: bool = conn.query_row(
-                "SELECT COUNT(*) FROM users WHERE email = ?1",
-                params![email],
-                |row| row.get::<_, i64>(0),
-            ).unwrap_or(0) > 0;
-            if exists {
-                return Err(AuthError::EmailTaken);
-            }
-        }
-
-        let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
-            .map_err(|_| AuthError::Internal)?;
-
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let api_key = format!("gc_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
-        let now = Utc::now().to_rfc3339();
-
+    pub fn get_workspace(&self, id: &str) -> Option<WorkspaceRecord> {
         let conn = self.conn.lock().unwrap();
-        // Create the api_key record first
-        conn.execute(
-            "INSERT INTO api_keys (key, name, tier, created_at) VALUES (?1, ?2, 'free', ?3)",
-            params![api_key, email, now],
-        ).map_err(|_| AuthError::Internal)?;
-        // Create the user
-        conn.execute(
-            "INSERT INTO users (id, email, password_hash, api_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![user_id, email, hash, api_key, now],
-        ).map_err(|_| AuthError::Internal)?;
-
-        Ok(api_key)
+        conn.query_row(
+            "SELECT id, name, owner_api_key, checkpoint_path, created_at, last_accessed_at FROM workspaces WHERE id = ?1",
+            params![id],
+            workspace_from_row,
+        ).ok()
     }
 
-    pub fn login_user(&self, email: &str, password: &str) -> Result<String, AuthError> {
+    pub fn list_workspaces(&self, api_key: &str) -> Vec<WorkspaceRecord> {
         let conn = self.conn.lock().unwrap();
-        let (hash, api_key): (String, String) = conn.query_row(
-            "SELECT password_hash, api_key FROM users WHERE email = ?1",
-            params![email],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).map_err(|_| AuthError::InvalidCredentials)?;
+        let mut stmt = conn.prepare(
+            "SELECT w.id, w.name, w.owner_api_key, w.checkpoint_path, w.created_at, w.last_accessed_at
+             FROM workspaces w
+             JOIN workspace_members m ON w.id = m.workspace_id
+             WHERE m.api_key = ?1
+             ORDER BY w.last_accessed_at DESC"
+        ).unwrap();
+        stmt.query_map(params![api_key], workspace_from_row)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
 
-        let valid = bcrypt::verify(password, &hash).map_err(|_| AuthError::Internal)?;
-        if !valid {
-            return Err(AuthError::InvalidCredentials);
+    pub fn can_access_workspace(&self, workspace_id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM workspace_members WHERE workspace_id = ?1 AND api_key = ?2",
+            params![workspace_id, api_key],
+            |_| Ok(true),
+        ).unwrap_or(false)
+    }
+
+    pub fn is_workspace_owner(&self, workspace_id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM workspaces WHERE id = ?1 AND owner_api_key = ?2",
+            params![workspace_id, api_key],
+            |_| Ok(true),
+        ).unwrap_or(false)
+    }
+
+    pub fn add_workspace_member(&self, workspace_id: &str, api_key: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_members (workspace_id, api_key, role, added_at) VALUES (?1, ?2, 'member', ?3)",
+            params![workspace_id, api_key, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_workspace_member(&self, workspace_id: &str, api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM workspace_members WHERE workspace_id = ?1 AND api_key = ?2 AND role != 'owner'",
+            params![workspace_id, api_key],
+        ).map(|n| n > 0).unwrap_or(false)
+    }
+
+    pub fn list_workspace_members(&self, workspace_id: &str) -> Vec<WorkspaceMember> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT api_key, role, added_at FROM workspace_members WHERE workspace_id = ?1 ORDER BY added_at"
+        ).unwrap();
+        stmt.query_map(params![workspace_id], |row| {
+            Ok(WorkspaceMember { api_key: row.get(0)?, role: row.get(1)?, added_at: row.get(2)? })
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
+    pub fn update_workspace_checkpoint(&self, id: &str, checkpoint_path: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE workspaces SET checkpoint_path = ?1, last_accessed_at = ?2 WHERE id = ?3",
+            params![checkpoint_path, Utc::now().to_rfc3339(), id],
+        );
+    }
+
+    pub fn touch_workspace(&self, id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE workspaces SET last_accessed_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), id],
+        );
+    }
+
+    pub fn delete_workspace(&self, id: &str, owner_api_key: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM workspaces WHERE id = ?1 AND owner_api_key = ?2",
+            params![id, owner_api_key],
+        ).unwrap_or(0);
+        if n > 0 {
+            let _ = conn.execute("DELETE FROM workspace_members WHERE workspace_id = ?1", params![id]);
         }
-        Ok(api_key)
+        n > 0
     }
 
     pub fn list_session_jobs(&self, session_id: &str, api_key: &str) -> Vec<JobRecord> {
@@ -651,6 +862,24 @@ pub struct SwarmWorkerRecord {
     pub finished_at: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct DailyUsage {
+    pub exec_count: i64,
+    pub total_duration_ms: i64,
+    pub swarm_count: i64,
+    pub install_count: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StripeCustomer {
+    pub api_key: String,
+    pub stripe_customer_id: String,
+    pub stripe_subscription_id: Option<String>,
+    pub plan: String,
+    pub status: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CheckpointInfo {
     pub id: String,
@@ -659,4 +888,32 @@ pub struct CheckpointInfo {
     pub path: String,
     pub created_at: String,
     pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceRecord {
+    pub id: String,
+    pub name: String,
+    pub owner_api_key: String,
+    pub checkpoint_path: Option<String>,
+    pub created_at: String,
+    pub last_accessed_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkspaceMember {
+    pub api_key: String,
+    pub role: String,
+    pub added_at: String,
+}
+
+fn workspace_from_row(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceRecord> {
+    Ok(WorkspaceRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        owner_api_key: row.get(2)?,
+        checkpoint_path: row.get(3)?,
+        created_at: row.get(4)?,
+        last_accessed_at: row.get(5)?,
+    })
 }
