@@ -18,9 +18,14 @@ deps=index.cuntext
 423  locked              session is already executing code
                          fix: wait for current execution to finish, or use /execute/async
 
-429  rate-limited        too many requests in current window
-                         body: {limit:int, window:str, plan:str, upgrade:url}
+429  rate-limited        too many requests per minute
+                         body: {error, limit:int, window:str, plan:str, upgrade:url}
                          fix: exponential backoff (1s, 2s, 4s, 8s)
+
+429  credits-exhausted   daily credit limit reached (1 credit = 1 exec-second)
+                         body: {error:"Daily credit limit reached", credits_used:int,
+                                credits_limit:int, resets:"midnight UTC", upgrade:url}
+                         fix: wait until midnight UTC, or upgrade at upgrade url
 
 507  storage-quota       checkpoint storage full for your plan
                          body: {used_mb:float, limit_mb:float}

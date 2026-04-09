@@ -1,30 +1,38 @@
-BILLING [usage, limits, plan upgrades]
+BILLING [credits, limits, plan upgrades]
 deps=index.cuntext
+
+# Credits: 1 credit = 1 second of execution time. Resets daily at midnight UTC.
+# Idle sessions consume zero credits.
 
 usage.get:
   GET /usage
   query: {date?:YYYY-MM-DD}
   → {plan:str, billing_status:str, date:str,
-     usage:{executions:{used,limit,remaining}, swarms:{used,limit,remaining},
-            total_compute_ms:int, checkpoint_storage_used_mb:int,
-            checkpoint_storage_limit_mb:int, checkpoint_retention_days:int},
-     limits:{requests_per_minute:int, executions_per_day:int|null,
-             concurrent_sessions:int, max_execution_secs:int}}
+     credits:{used:int, limit:int|null, remaining:int|null, resets:"midnight UTC"},
+     storage:{used_mb:int, limit_mb:int|null, retention_days:int},
+     limits:{requests_per_minute:int, concurrent_sessions:int, max_execution_secs:int}}
 
 tiers:
-  free:       60rpm  | 100 exec/day | 3 sessions  | 500MB  | 7d retention  | $0
-  pro:        300rpm | 10k exec/day | 50 sessions  | 5GB    | 30d retention | pay-as-you-go
-  enterprise: unlimited             | 500 sessions | 50GB   | 90d retention | custom
+  hobby:   60rpm  | 50 credits/day  | 2 sessions  | 200MB | 3d retention  | $0
+  builder: 300rpm | 500 credits/day | 10 sessions | 5GB   | 30d retention | $20/mo
+  scale:   2000rpm| unlimited       | 100 sessions| 50GB  | 90d retention | $49/mo
+
+credit-limit-hit: 429
+  body: {error:"Daily credit limit reached", credits_used:int, credits_limit:int,
+         plan:str, resets:"midnight UTC", upgrade:"https://compute.deep-ml.com/dashboard"}
+  fix: wait until midnight UTC, or upgrade plan
 
 billing.checkout:
   POST /billing/checkout
-  body: {plan:"pro"|"enterprise", email?:str, success_url?:str, cancel_url?:str}
+  body: {plan:"builder"|"scale", email?:str, success_url?:str, cancel_url?:str}
   → {checkout_url:str, plan:str}
+  note: redirect user to checkout_url to complete payment
 
 billing.portal:
   POST /billing/portal
   body: {return_url?:str}
   → {portal_url:str}
+  note: redirect user to portal_url to manage/cancel subscription
 
 rate-limit: 429 {error, limit, window, plan, upgrade}
-quota-full: 507 {error, used_mb, limit_mb}
+storage-full: 507 {error, used_mb, limit_mb}

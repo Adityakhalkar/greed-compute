@@ -25,6 +25,7 @@ quick-ref:
   ws.exec         POST /workspaces/{id}/execute
   usage           GET  /usage
 
-tiers: free(60rpm,100exec/day,500MB,7d) pro(300rpm,10000exec/day,5GB,30d) enterprise(unlimited)
-on-error: 401=bad-key 404=session-expired(recreate) 423=session-busy 429=rate-limited(backoff) 507=storage-full
+credits: 1 credit = 1 execution-second. resets daily midnight UTC. idle sessions = 0 credits.
+tiers: hobby($0,50cr/day) builder($20/mo,500cr/day) scale($49/mo,unlimited)
+on-error: 401=bad-key 404=session-expired(recreate) 423=session-busy 429=rate-limited-or-credits-exhausted 507=storage-full
 errors: → fragments/errors.cuntext
