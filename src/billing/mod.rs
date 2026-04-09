@@ -1,4 +1,10 @@
-/// Enterprise billing — plan limits, Stripe integration, usage enforcement.
+/// Billing — plan limits, Stripe integration, usage enforcement.
+///
+/// Tiers: "hobby" (free), "builder" ($20/mo), "scale" ($49/mo)
+/// Legacy aliases "free", "pro", "enterprise" are accepted for backward compat.
+///
+/// Credits: 1 credit = 1 second of execution time.
+/// Daily credit limits: hobby=50, builder=500, scale=unlimited.
 
 // ── Plan tiers ────────────────────────────────────────────────────────────────
 
@@ -6,10 +12,8 @@
 pub struct PlanLimits {
     /// Max API requests per minute (sliding window, in-memory)
     pub requests_per_minute: u32,
-    /// Max code executions per day (execute + stream + async)
-    pub executions_per_day: u32,
-    /// Max swarms submitted per day
-    pub swarms_per_day: u32,
+    /// Daily compute credits (1 credit = 1 execution-second). u32::MAX = unlimited.
+    pub credits_per_day: u32,
     /// Max concurrent sessions allowed at once
     pub concurrent_sessions: u32,
     /// Max single execution wall time in seconds
@@ -23,34 +27,41 @@ pub struct PlanLimits {
 impl PlanLimits {
     pub fn for_tier(tier: &str) -> Self {
         match tier {
-            "pro" => Self {
+            // ── Builder — $20/month ───────────────────────────────────────────
+            "builder" | "pro" => Self {
                 requests_per_minute: 300,
-                executions_per_day: 5_000,
-                swarms_per_day: 100,
-                concurrent_sessions: 20,
+                credits_per_day: 500,
+                concurrent_sessions: 10,
                 max_execution_secs: 120,
                 checkpoint_storage_bytes: 5 * 1024 * 1024 * 1024,  // 5 GB
                 checkpoint_retention_days: 30,
             },
-            "enterprise" => Self {
+            // ── Scale — $49/month ─────────────────────────────────────────────
+            "scale" | "enterprise" => Self {
                 requests_per_minute: 2_000,
-                executions_per_day: u32::MAX,
-                swarms_per_day: u32::MAX,
+                credits_per_day: u32::MAX,
                 concurrent_sessions: 100,
                 max_execution_secs: 600,
                 checkpoint_storage_bytes: 50 * 1024 * 1024 * 1024, // 50 GB
                 checkpoint_retention_days: 90,
             },
-            // free / unknown
+            // ── Hobby — free ──────────────────────────────────────────────────
             _ => Self {
                 requests_per_minute: 60,
-                executions_per_day: 100,
-                swarms_per_day: 5,
-                concurrent_sessions: 3,
+                credits_per_day: 50,
+                concurrent_sessions: 2,
                 max_execution_secs: 30,
-                checkpoint_storage_bytes: 500 * 1024 * 1024,        // 500 MB
-                checkpoint_retention_days: 7,
+                checkpoint_storage_bytes: 200 * 1024 * 1024,        // 200 MB
+                checkpoint_retention_days: 3,
             },
+        }
+    }
+
+    pub fn tier_display(tier: &str) -> &'static str {
+        match tier {
+            "builder" | "pro"        => "builder",
+            "scale"   | "enterprise" => "scale",
+            _                        => "hobby",
         }
     }
 
