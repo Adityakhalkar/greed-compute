@@ -15,7 +15,7 @@ Credits reset daily at midnight UTC. Idle sessions consume zero credits.
 | Tier | Price | Credits/day | Sessions | Storage | Retention | RPM |
 |------|-------|-------------|----------|---------|-----------|-----|
 | **hobby** | Free | 50 | 2 | 200 MB | 3 days | 60 |
-| **builder** | $20/mo | 500 | 10 | 5 GB | 30 days | 300 |
+| **builder** | $15/mo | 500 | 10 | 5 GB | 30 days | 300 |
 | **scale** | $49/mo | Unlimited | 100 | 50 GB | 90 days | 2,000 |
 
 ### Tier name aliases (backward compat)
@@ -102,7 +102,7 @@ Existing Stripe subscriptions using old tier names continue to work.
 
 Using the same Stripe account as Deep-ML. Create two new products:
 
-1. **greed-compute Builder** → $20/month recurring → copy `price_xxx` as `STRIPE_PRICE_PRO`
+1. **greed-compute Builder** → $15/month recurring → copy `price_xxx` as `STRIPE_PRICE_PRO`
 2. **greed-compute Scale** → $49/month recurring → copy `price_xxx` as `STRIPE_PRICE_ENTERPRISE`
 
 Env vars on VPS (env var names unchanged):
