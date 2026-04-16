@@ -16,7 +16,7 @@ Credits reset daily at midnight UTC. Idle sessions consume zero credits.
 |------|-------|-------------|----------|---------|-----------|-----|
 | **hobby** | Free | 50 | 2 | 200 MB | 3 days | 60 |
 | **builder** | $15/mo | 500 | 10 | 5 GB | 30 days | 300 |
-| **scale** | $49/mo | Unlimited | 100 | 50 GB | 90 days | 2,000 |
+| **scale** | $49/mo | 5,000 credits/day | 100 | 50 GB | 90 days | 2,000 |
 
 ### Tier name aliases (backward compat)
 - `free` → `hobby`

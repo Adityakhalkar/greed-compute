@@ -15,7 +15,7 @@ usage.get:
 tiers:
   hobby:   60rpm  | 50 credits/day  | 2 sessions  | 200MB | 3d retention  | $0
   builder: 300rpm | 500 credits/day | 10 sessions | 5GB   | 30d retention | $15/mo
-  scale:   2000rpm| unlimited       | 100 sessions| 50GB  | 90d retention | $49/mo
+  scale:   2000rpm| 5000 credits/day| 100 sessions| 50GB  | 90d retention | $49/mo
 
 credit-limit-hit: 429
   body: {error:"Daily credit limit reached", credits_used:int, credits_limit:int,

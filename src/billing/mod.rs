@@ -39,7 +39,7 @@ impl PlanLimits {
             // ── Scale — $49/month ─────────────────────────────────────────────
             "scale" | "enterprise" => Self {
                 requests_per_minute: 2_000,
-                credits_per_day: u32::MAX,
+                credits_per_day: 5_000,
                 concurrent_sessions: 100,
                 max_execution_secs: 600,
                 checkpoint_storage_bytes: 50 * 1024 * 1024 * 1024, // 50 GB
