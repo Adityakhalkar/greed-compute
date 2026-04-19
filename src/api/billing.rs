@@ -59,8 +59,8 @@ pub async fn create_checkout(
 ) -> Result<Json<Value>, StatusCode> {
     let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if !matches!(body.plan.as_str(), "pro" | "enterprise") {
-        return Ok(Json(json!({ "error": "plan must be 'pro' or 'enterprise'" })));
+    if !matches!(body.plan.as_str(), "builder" | "pro" | "scale" | "enterprise") {
+        return Ok(Json(json!({ "error": "plan must be 'builder' or 'scale'" })));
     }
 
     let stripe = stripe_client().ok_or_else(|| {
@@ -69,9 +69,9 @@ pub async fn create_checkout(
     })?;
 
     let price_env = match body.plan.as_str() {
-        "pro"        => "STRIPE_PRICE_PRO",
-        "enterprise" => "STRIPE_PRICE_ENTERPRISE",
-        _            => unreachable!(),
+        "builder" | "pro"        => "STRIPE_PRICE_PRO",
+        "scale"   | "enterprise" => "STRIPE_PRICE_ENTERPRISE",
+        _                        => unreachable!(),
     };
     let price_id = std::env::var(price_env).map_err(|_| {
         tracing::warn!("{} not set", price_env);
