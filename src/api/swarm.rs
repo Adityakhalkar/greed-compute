@@ -95,7 +95,7 @@ pub async fn create_swarm(
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
         {
             let mut rt = session.runtime.lock().await;
-            let result = rt.execute(tpl_code).await;
+            let result = rt.execute(tpl_code, false).await;
             if result.error.is_some() {
                 state.sessions.terminate_session(&tpl_session.session_id);
                 return Ok(Json(json!({
@@ -317,7 +317,7 @@ async fn run_worker(
     let result = {
         let mut rt = session.runtime.lock().await;
         session.touch();
-        rt.execute(&full_code).await
+        rt.execute(&full_code, false).await
     };
 
     // result.result is populated from worker's eval repr.
@@ -378,7 +378,7 @@ async fn run_streaming_reduce(
     // Initialize reducer state
     {
         let mut rt = session.runtime.lock().await;
-        let _ = rt.execute("results = []\n_reduce_running = None").await;
+        let _ = rt.execute("results = []\n_reduce_running = None", false).await;
     }
 
     let mut completed = 0;
@@ -419,7 +419,7 @@ async fn run_streaming_reduce(
         let reduce_result = {
             let mut rt = session.runtime.lock().await;
             session.touch();
-            rt.execute(&feed_code).await
+            rt.execute(&feed_code, false).await
         };
 
         last_stdout = Some(reduce_result.stdout.clone());
@@ -438,7 +438,7 @@ async fn run_streaming_reduce(
         if let Some(var) = last_assigned_var(reduce_fn) {
             let finalize = {
                 let mut rt = session.runtime.lock().await;
-                rt.execute(&var).await
+                rt.execute(&var, false).await
             };
             if finalize.result.is_some() {
                 last_result = finalize.result;

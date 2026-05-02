@@ -388,7 +388,7 @@ def _split_last_expr(code):
     return body_code, expr_code
 
 
-def handle_execute(code, session_globals, streaming=False):
+def handle_execute(code, session_globals, streaming=False, track_tokens=True):
     timeout = get_cpu_timeout()
     start = time.monotonic()
     error = None
@@ -459,8 +459,12 @@ def handle_execute(code, session_globals, streaming=False):
 
     duration_ms = int((time.monotonic() - start) * 1000)
     stdout_val = captured.getvalue()
-    output_tokens = _estimate_output_tokens(stdout_val, eval_result_repr, html)
-    state_tokens = _estimate_state_tokens(session_globals)
+    if track_tokens:
+        output_tokens = _estimate_output_tokens(stdout_val, eval_result_repr, html)
+        state_tokens = _estimate_state_tokens(session_globals)
+    else:
+        output_tokens = 0
+        state_tokens = 0
     emit({
         "type": "result",
         "stdout": stdout_val,
@@ -512,7 +516,8 @@ def main():
         elif msg_type == "execute":
             code = msg.get("code", "")
             streaming = msg.get("stream", False)
-            handle_execute(code, session_globals, streaming=streaming)
+            track_tokens = msg.get("track_tokens", True)
+            handle_execute(code, session_globals, streaming=streaming, track_tokens=track_tokens)
         elif msg_type == "checkpoint":
             handle_checkpoint(msg.get("path", ""), session_globals)
         elif msg_type == "restore":

@@ -238,7 +238,7 @@ async fn execute_code(
     // Non-blocking try_lock — if the session is already executing, return 423
     // immediately instead of queuing. Matches Jupyter's "kernel busy" behavior.
     let mut runtime = session.runtime.try_lock().map_err(|_| StatusCode::from_u16(423).unwrap())?;
-    let result = runtime.execute(&body.code).await;
+    let result = runtime.execute(&body.code, session.token_tracking).await;
     drop(runtime);
 
     // Token tracking: conditionally accumulate and expose.
@@ -310,7 +310,7 @@ async fn execute_code_stream(
 
     tokio::spawn(async move {
         let mut runtime = session_clone.runtime.lock().await;
-        let result = runtime.execute_streaming(&code, tx.clone()).await;
+        let result = runtime.execute_streaming(&code, tx.clone(), session_clone.token_tracking).await;
 
         let (out_tok, state_tok) = if session_clone.token_tracking {
             session_clone.record_tokens(result.output_tokens, result.state_tokens);
@@ -408,7 +408,7 @@ async fn execute_code_async(
 
         let mut runtime = session.runtime.lock().await;
         session.touch();
-        let result = runtime.execute(&code).await;
+        let result = runtime.execute(&code, session.token_tracking).await;
         drop(runtime);
 
         let result_str = result.result.as_deref();

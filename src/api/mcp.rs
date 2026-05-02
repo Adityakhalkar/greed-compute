@@ -243,7 +243,7 @@ async fn dispatch(
                 Err(_) => return tool_err("Session is busy — another execution is running"),
             };
             session.touch();
-            let result = runtime.execute(code).await;
+            let result = runtime.execute(code, session.token_tracking).await;
             drop(runtime);
 
             let mut parts = Vec::new();
@@ -326,7 +326,7 @@ async fn dispatch(
                 state_clone.db.set_job_running(&job_id_clone);
                 let mut runtime = session.runtime.lock().await;
                 session.touch();
-                let result = runtime.execute(&code_owned).await;
+                let result = runtime.execute(&code_owned, session.token_tracking).await;
                 drop(runtime);
                 state_clone.db.set_job_done(
                     &job_id_clone, &result.stdout,

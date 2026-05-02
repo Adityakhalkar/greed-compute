@@ -34,6 +34,9 @@ struct WorkerCommand {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    /// When false the worker skips _estimate_state_tokens (can be slow for large variables).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    track_tokens: Option<bool>,
 }
 
 pub struct PythonRuntime {
@@ -161,12 +164,13 @@ impl PythonRuntime {
         })
     }
 
-    pub async fn execute(&mut self, code: &str) -> ExecutionResult {
+    pub async fn execute(&mut self, code: &str, token_tracking: bool) -> ExecutionResult {
         let cmd = WorkerCommand {
             cmd_type: "execute".to_string(),
             code: Some(code.to_string()),
             stream: Some(false),
             path: None,
+            track_tokens: Some(token_tracking),
         };
 
         let mut cmd_json =
@@ -238,12 +242,14 @@ impl PythonRuntime {
         &mut self,
         code: &str,
         tx: mpsc::Sender<String>,
+        token_tracking: bool,
     ) -> ExecutionResult {
         let cmd = WorkerCommand {
             cmd_type: "execute".to_string(),
             code: Some(code.to_string()),
             stream: Some(true),
             path: None,
+            track_tokens: Some(token_tracking),
         };
 
         let mut cmd_json = serde_json::to_string(&cmd)
@@ -351,6 +357,7 @@ impl PythonRuntime {
             code: None,
             stream: None,
             path: None,
+            track_tokens: None,
         };
         let mut cmd_json = serde_json::to_string(&cmd).unwrap_or_else(|_| r#"{"type":"clear"}"#.to_string());
         cmd_json.push('\n');
@@ -369,6 +376,7 @@ impl PythonRuntime {
             code: None,
             stream: None,
             path: Some(path.to_string()),
+            track_tokens: None,
         };
 
         let mut cmd_json = serde_json::to_string(&cmd)
@@ -405,6 +413,7 @@ impl PythonRuntime {
             code: None,
             stream: None,
             path: Some(path.to_string()),
+            track_tokens: None,
         };
 
         let mut cmd_json = serde_json::to_string(&cmd)

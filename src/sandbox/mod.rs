@@ -201,7 +201,7 @@ impl SessionManager {
             match PythonRuntime::spawn(&workspace, &self.worker_path, &self.python_path).await {
                 Ok(mut runtime) => {
                     if let Some(code) = template.install_code() {
-                        let res = runtime.execute(&code).await;
+                        let res = runtime.execute(&code, false).await;
                         if res.error.is_some() {
                             tracing::warn!(template = template.name(), "Template install had error, discarding");
                             continue;
@@ -239,7 +239,7 @@ impl SessionManager {
         tracing::warn!(template = template.name(), "Template pool empty, cold-spawning");
         let mut runtime = PythonRuntime::spawn(workspace, &self.worker_path, &self.python_path).await?;
         if let Some(code) = template.install_code() {
-            runtime.execute(&code).await;
+            runtime.execute(&code, false).await;
         }
         Ok(runtime)
     }

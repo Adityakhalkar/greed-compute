@@ -109,7 +109,7 @@ async fn get_or_boot(
                 "import dill as _dill\nwith open({:?}, 'rb') as _f:\n    _ns = _dill.load(_f)\nglobals().update(_ns)\ndel _dill, _f, _ns",
                 ckpt
             );
-            runtime.execute(&restore_code).await;
+            runtime.execute(&restore_code, false).await;
             tracing::info!(workspace_id, ckpt, "Workspace restored from checkpoint");
         }
     }
@@ -135,7 +135,7 @@ async fn persist(
     );
 
     let mut rt = rt_lock.lock().await;
-    rt.runtime.execute(&save_code).await;
+    rt.runtime.execute(&save_code, false).await;
     drop(rt);
 
     state.db.update_workspace_checkpoint(workspace_id, &path_str);
@@ -247,7 +247,7 @@ pub async fn execute_in_workspace(
     let start = std::time::Instant::now();
     let exec_result = {
         let mut rt = rt_lock.lock().await;
-        rt.runtime.execute(&body.code).await
+        rt.runtime.execute(&body.code, state.token_tracking).await
     };
     let duration_ms = start.elapsed().as_millis() as u64;
 
