@@ -114,41 +114,27 @@ pub async fn auth_middleware(
         entry.push_back(now);
     }
 
-    // ── Daily quota check for execute / swarm endpoints ───────────────────────
-    let is_execute = path.ends_with("/execute") || path.ends_with("/execute/async") || path.ends_with("/execute/stream");
-    let is_swarm   = path == "/v1/swarm";
+    // ── Daily credit quota check (execute + swarm endpoints) ─────────────────
+    // 1 credit = 1 second of execution. Checked before execution so the user
+    // gets a clear error instead of a surprise at the end.
+    let is_compute = path.ends_with("/execute")
+        || path.ends_with("/execute/async")
+        || path.ends_with("/execute/stream")
+        || path == "/v1/swarm";
 
-    if is_execute && !limits.is_unlimited(limits.executions_per_day) {
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let usage = state.db.get_daily_usage(&key, &today);
-        if usage.exec_count >= limits.executions_per_day as i64 {
+    if is_compute && !limits.is_unlimited(limits.credits_per_day) {
+        let credits_used = state.db.get_credits_used_today(&key);
+        if credits_used >= limits.credits_per_day {
+            let plan = crate::billing::PlanLimits::tier_display(&key_info.tier);
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
-                    "error": "Daily execution quota exceeded",
-                    "plan": key_info.tier,
-                    "limit": limits.executions_per_day,
-                    "used": usage.exec_count,
+                    "error": "Daily credit limit reached",
+                    "plan": plan,
+                    "credits_used": credits_used,
+                    "credits_limit": limits.credits_per_day,
                     "resets": "midnight UTC",
-                    "upgrade": "https://compute.deep-ml.com/billing"
-                })),
-            ).into_response());
-        }
-    }
-
-    if is_swarm && !limits.is_unlimited(limits.swarms_per_day) {
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let usage = state.db.get_daily_usage(&key, &today);
-        if usage.swarm_count >= limits.swarms_per_day as i64 {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": "Daily swarm quota exceeded",
-                    "plan": key_info.tier,
-                    "limit": limits.swarms_per_day,
-                    "used": usage.swarm_count,
-                    "resets": "midnight UTC",
-                    "upgrade": "https://compute.deep-ml.com/billing"
+                    "upgrade": "https://compute.deep-ml.com/dashboard"
                 })),
             ).into_response());
         }

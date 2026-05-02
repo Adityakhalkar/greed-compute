@@ -59,8 +59,8 @@ pub async fn create_checkout(
 ) -> Result<Json<Value>, StatusCode> {
     let api_key = api_key_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if !matches!(body.plan.as_str(), "pro" | "enterprise") {
-        return Ok(Json(json!({ "error": "plan must be 'pro' or 'enterprise'" })));
+    if !matches!(body.plan.as_str(), "builder" | "pro" | "scale" | "enterprise") {
+        return Ok(Json(json!({ "error": "plan must be 'builder' or 'scale'" })));
     }
 
     let stripe = stripe_client().ok_or_else(|| {
@@ -69,9 +69,9 @@ pub async fn create_checkout(
     })?;
 
     let price_env = match body.plan.as_str() {
-        "pro"        => "STRIPE_PRICE_PRO",
-        "enterprise" => "STRIPE_PRICE_ENTERPRISE",
-        _            => unreachable!(),
+        "builder" | "pro"        => "STRIPE_PRICE_PRO",
+        "scale"   | "enterprise" => "STRIPE_PRICE_ENTERPRISE",
+        _                        => unreachable!(),
     };
     let price_id = std::env::var(price_env).map_err(|_| {
         tracing::warn!("{} not set", price_env);
@@ -251,54 +251,39 @@ pub async fn get_usage(
     let key_info = state.db.validate_api_key(&api_key).ok_or(StatusCode::UNAUTHORIZED)?;
 
     let date = q.date.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
-    let usage = state.db.get_daily_usage(&api_key, &date);
+    let _usage = state.db.get_daily_usage(&api_key, &date);
     let limits = PlanLimits::for_tier(&key_info.tier);
     let stripe = state.db.get_stripe_customer(&api_key);
 
-    let exec_limit = if limits.is_unlimited(limits.executions_per_day) {
+    let credits_used = state.db.get_credits_used_today(&api_key);
+    let credits_limit = if limits.is_unlimited(limits.credits_per_day) {
         Value::Null
     } else {
-        json!(limits.executions_per_day)
+        json!(limits.credits_per_day)
     };
-    let swarm_limit = if limits.is_unlimited(limits.swarms_per_day) {
+    let credits_remaining = if limits.is_unlimited(limits.credits_per_day) {
         Value::Null
     } else {
-        json!(limits.swarms_per_day)
+        json!((limits.credits_per_day as i64 - credits_used as i64).max(0))
     };
 
     Ok(Json(json!({
         "date": date,
-        "plan": key_info.tier,
+        "plan": PlanLimits::tier_display(&key_info.tier),
         "billing_status": stripe.as_ref().map(|s| s.status.as_str()).unwrap_or("none"),
-        "usage": {
-            "executions": {
-                "used": usage.exec_count,
-                "limit": exec_limit,
-                "remaining": if limits.is_unlimited(limits.executions_per_day) {
-                    Value::Null
-                } else {
-                    json!((limits.executions_per_day as i64 - usage.exec_count).max(0))
-                }
-            },
-            "swarms": {
-                "used": usage.swarm_count,
-                "limit": swarm_limit,
-                "remaining": if limits.is_unlimited(limits.swarms_per_day) {
-                    Value::Null
-                } else {
-                    json!((limits.swarms_per_day as i64 - usage.swarm_count).max(0))
-                }
-            },
-            "total_compute_ms": usage.total_duration_ms,
-            "total_compute_mins": usage.total_duration_ms / 60_000,
-            "checkpoint_storage_used_mb": state.db.checkpoint_storage_used(&api_key) / (1024 * 1024),
-            "checkpoint_storage_limit_mb": if limits.checkpoint_storage_bytes == u64::MAX { serde_json::Value::Null } else { json!(limits.checkpoint_storage_bytes / (1024 * 1024)) },
-            "checkpoint_retention_days": limits.checkpoint_retention_days,
+        "credits": {
+            "used": credits_used,
+            "limit": credits_limit,
+            "remaining": credits_remaining,
+            "resets": "midnight UTC",
+        },
+        "storage": {
+            "used_mb": state.db.checkpoint_storage_used(&api_key) / (1024 * 1024),
+            "limit_mb": if limits.checkpoint_storage_bytes == u64::MAX { Value::Null } else { json!(limits.checkpoint_storage_bytes / (1024 * 1024)) },
+            "retention_days": limits.checkpoint_retention_days,
         },
         "limits": {
             "requests_per_minute": limits.requests_per_minute,
-            "executions_per_day": exec_limit,
-            "swarms_per_day": swarm_limit,
             "concurrent_sessions": limits.concurrent_sessions,
             "max_execution_secs": limits.max_execution_secs,
         }

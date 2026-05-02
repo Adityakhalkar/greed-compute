@@ -245,6 +245,15 @@ impl Database {
         ).unwrap_or_default()
     }
 
+    /// Credits used today = ceil(total_duration_ms / 1000).
+    /// 1 credit = 1 second of execution time.
+    pub fn get_credits_used_today(&self, api_key: &str) -> u32 {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let usage = self.get_daily_usage(api_key, &today);
+        // ceil division: (ms + 999) / 1000
+        ((usage.total_duration_ms.max(0) as u64 + 999) / 1000) as u32
+    }
+
     // ── Enterprise: Stripe ───────────────────────────────────────────────────
 
     pub fn upsert_stripe_customer(
