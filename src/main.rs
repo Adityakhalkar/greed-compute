@@ -64,6 +64,9 @@ pub struct AppState {
     pub rate_windows: DashMap<String, VecDeque<Instant>>,
     /// Live workspace runtimes: workspace_id → locked PythonRuntime
     pub workspaces: WorkspaceMap,
+    /// Whether token budget tracking is enabled server-wide.
+    /// Set via GREED_TOKEN_TRACKING=false to disable. Default: true.
+    pub token_tracking: bool,
 }
 
 #[tokio::main]
@@ -118,11 +121,17 @@ async fn main() {
         sweep_sessions.run_sweeper().await;
     });
 
+    let token_tracking = std::env::var("GREED_TOKEN_TRACKING")
+        .map(|v| v.to_lowercase() != "false" && v != "0")
+        .unwrap_or(true);
+    tracing::info!(token_tracking, "Token budget tracking");
+
     let state = Arc::new(AppState {
         sessions,
         db,
         rate_windows: DashMap::new(),
         workspaces: Arc::new(DashMap::new()),
+        token_tracking,
     });
 
     // Grace-checkpoint + retention cleanup task

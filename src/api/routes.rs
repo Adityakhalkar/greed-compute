@@ -90,6 +90,9 @@ struct CreateSessionRequest {
     packages: Option<Vec<String>>,
     /// Restore a saved checkpoint into the new session immediately
     checkpoint_id: Option<String>,
+    /// Override server-wide token tracking for this session.
+    /// Omit to inherit the server default (GREED_TOKEN_TRACKING env var).
+    token_tracking: Option<bool>,
 }
 
 async fn create_session(
@@ -102,7 +105,8 @@ async fn create_session(
     let template = body.template.as_deref()
         .and_then(SessionTemplate::from_str)
         .unwrap_or(SessionTemplate::Blank);
-    let session = match state.sessions.create_session_for_key(body.ttl_seconds, api_key, Some(template)).await {
+    let token_tracking = body.token_tracking.unwrap_or(state.token_tracking);
+    let session = match state.sessions.create_session_for_key(body.ttl_seconds, api_key, Some(template), token_tracking).await {
         Ok(info) => info,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create session");
@@ -215,7 +219,9 @@ struct ExecuteResponse {
     plots: Vec<String>,
     /// HTML table when the last expression was a DataFrame or Series
     html: Option<String>,
-    tokens: ExecuteTokenInfo,
+    /// Present only when token tracking is enabled for this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<ExecuteTokenInfo>,
 }
 
 async fn execute_code(
@@ -235,24 +241,32 @@ async fn execute_code(
     let result = runtime.execute(&body.code).await;
     drop(runtime);
 
-    // Accumulate token data in session before touch() increments calls_used.
-    session.record_tokens(result.output_tokens, result.state_tokens);
+    // Token tracking: conditionally accumulate and expose.
+    let tokens = if session.token_tracking {
+        session.record_tokens(result.output_tokens, result.state_tokens);
+        let report = session.token_report();
+        Some(ExecuteTokenInfo {
+            output_tokens: result.output_tokens,
+            session_state_tokens: result.state_tokens,
+            estimated_context_tokens_without_sandbox: result.output_tokens + result.state_tokens,
+            cumulative_session_savings: report.net_token_savings,
+        })
+    } else {
+        None
+    };
 
     // Renew TTL on every execute — keeps active notebook sessions alive
     session.touch();
 
-    // Record usage event
-    if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        state.db.record_usage_event(key, "execute", Some(&id), None, result.duration_ms as i64);
-    }
-
-    let report = session.token_report();
-    let tokens = ExecuteTokenInfo {
-        output_tokens: result.output_tokens,
-        session_state_tokens: result.state_tokens,
-        estimated_context_tokens_without_sandbox: result.output_tokens + result.state_tokens,
-        cumulative_session_savings: report.net_token_savings,
+    // Record usage event — token columns are 0 when tracking is disabled
+    let (out_tok, state_tok) = if session.token_tracking {
+        (result.output_tokens, result.state_tokens)
+    } else {
+        (0, 0)
     };
+    if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        state.db.record_usage_event(key, "execute", Some(&id), None, result.duration_ms as i64, out_tok, state_tok);
+    }
 
     Ok(Json(ExecuteResponse {
         stdout: result.stdout,
@@ -297,13 +311,20 @@ async fn execute_code_stream(
     tokio::spawn(async move {
         let mut runtime = session_clone.runtime.lock().await;
         let result = runtime.execute_streaming(&code, tx.clone()).await;
+
+        let (out_tok, state_tok) = if session_clone.token_tracking {
+            session_clone.record_tokens(result.output_tokens, result.state_tokens);
+            (result.output_tokens, result.state_tokens)
+        } else {
+            (0, 0)
+        };
         session_clone.touch();
-        // Record usage
+
         if let Some(key) = api_key {
-            state_clone.db.record_usage_event(&key, "stream_execute", Some(&session_id), None, result.duration_ms as i64);
+            state_clone.db.record_usage_event(&key, "stream_execute", Some(&session_id), None, result.duration_ms as i64, out_tok, state_tok);
         }
         // Send the final result as the last SSE event
-        let final_json = serde_json::json!({
+        let mut final_val = serde_json::json!({
             "type": "result",
             "stdout": result.stdout,
             "error": result.error,
@@ -311,6 +332,16 @@ async fn execute_code_stream(
             "plots": result.plots,
             "html": result.html,
         });
+        if session_clone.token_tracking {
+            let report = session_clone.token_report();
+            final_val["tokens"] = serde_json::json!({
+                "output_tokens": result.output_tokens,
+                "session_state_tokens": result.state_tokens,
+                "estimated_context_tokens_without_sandbox": result.output_tokens + result.state_tokens,
+                "cumulative_session_savings": report.net_token_savings,
+            });
+        }
+        let final_json = final_val;
         let _ = tx.send(final_json.to_string()).await;
     });
 

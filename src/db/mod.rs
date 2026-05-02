@@ -167,6 +167,10 @@ impl Database {
         // because the column may already exist from a previous migration run.
         let _ = conn.execute_batch("ALTER TABLE api_keys ADD COLUMN stripe_customer_id TEXT;");
         let _ = conn.execute_batch("ALTER TABLE api_keys ADD COLUMN stripe_subscription_id TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE usage_events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;");
+        let _ = conn.execute_batch("ALTER TABLE usage_events ADD COLUMN state_tokens INTEGER NOT NULL DEFAULT 0;");
+        let _ = conn.execute_batch("ALTER TABLE daily_usage ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;");
+        let _ = conn.execute_batch("ALTER TABLE daily_usage ADD COLUMN total_state_tokens INTEGER NOT NULL DEFAULT 0;");
 
         Ok(())
     }
@@ -204,29 +208,34 @@ impl Database {
         session_id: Option<&str>,
         swarm_id: Option<&str>,
         duration_ms: i64,
+        output_tokens: u64,
+        state_tokens: u64,
     ) {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
-            "INSERT INTO usage_events (api_key, event_type, session_id, swarm_id, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![api_key, event_type, session_id, swarm_id, duration_ms],
+            "INSERT INTO usage_events (api_key, event_type, session_id, swarm_id, duration_ms, output_tokens, state_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![api_key, event_type, session_id, swarm_id, duration_ms, output_tokens as i64, state_tokens as i64],
         );
         // Upsert daily aggregation
         let _ = conn.execute(
-            "INSERT INTO daily_usage (api_key, date, exec_count, total_duration_ms, swarm_count, install_count)
+            "INSERT INTO daily_usage (api_key, date, exec_count, total_duration_ms, swarm_count, install_count, total_output_tokens, total_state_tokens)
              VALUES (?1, ?2,
                  CASE WHEN ?3 IN ('execute','stream_execute','async_execute') THEN 1 ELSE 0 END,
                  ?4,
                  CASE WHEN ?3 = 'swarm' THEN 1 ELSE 0 END,
-                 CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END
+                 CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END,
+                 ?5, ?6
              )
              ON CONFLICT(api_key, date) DO UPDATE SET
                  exec_count = exec_count + CASE WHEN ?3 IN ('execute','stream_execute','async_execute') THEN 1 ELSE 0 END,
                  total_duration_ms = total_duration_ms + ?4,
                  swarm_count = swarm_count + CASE WHEN ?3 = 'swarm' THEN 1 ELSE 0 END,
-                 install_count = install_count + CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END",
-            params![api_key, today, event_type, duration_ms],
+                 install_count = install_count + CASE WHEN ?3 = 'install' THEN 1 ELSE 0 END,
+                 total_output_tokens = total_output_tokens + ?5,
+                 total_state_tokens = total_state_tokens + ?6",
+            params![api_key, today, event_type, duration_ms, output_tokens as i64, state_tokens as i64],
         );
     }
 

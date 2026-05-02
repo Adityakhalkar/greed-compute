@@ -88,6 +88,9 @@ pub struct Session {
     pub workspace: PathBuf,
     /// API key that owns this session — used for grace checkpointing on expiry.
     pub api_key: Option<String>,
+    /// Whether token budget tracking is active for this session.
+    /// Inherits from the server-wide flag; can be overridden per-session on create.
+    pub token_tracking: bool,
 }
 
 impl Session {
@@ -292,15 +295,15 @@ impl SessionManager {
         PythonRuntime::spawn(workspace, &self.worker_path, &self.python_path).await
     }
 
-    pub async fn create_session_for_key(&self, ttl_secs: Option<i64>, api_key: Option<String>, template: Option<SessionTemplate>) -> Result<SessionInfo, String> {
-        self.create_session_inner(ttl_secs, api_key, template).await
+    pub async fn create_session_for_key(&self, ttl_secs: Option<i64>, api_key: Option<String>, template: Option<SessionTemplate>, token_tracking: bool) -> Result<SessionInfo, String> {
+        self.create_session_inner(ttl_secs, api_key, template, token_tracking).await
     }
 
     pub async fn create_session(&self, ttl_secs: Option<i64>) -> Result<SessionInfo, String> {
-        self.create_session_inner(ttl_secs, None, None).await
+        self.create_session_inner(ttl_secs, None, None, true).await
     }
 
-    async fn create_session_inner(&self, ttl_secs: Option<i64>, api_key: Option<String>, template: Option<SessionTemplate>) -> Result<SessionInfo, String> {
+    async fn create_session_inner(&self, ttl_secs: Option<i64>, api_key: Option<String>, template: Option<SessionTemplate>, token_tracking: bool) -> Result<SessionInfo, String> {
         let session_id = Uuid::new_v4().to_string();
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
         let now = Utc::now();
@@ -335,6 +338,7 @@ impl SessionManager {
             runtime: Arc::new(Mutex::new(runtime)),
             workspace,
             api_key,
+            token_tracking,
         });
 
         self.sessions.insert(session_id, session);

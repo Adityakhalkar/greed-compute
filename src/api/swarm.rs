@@ -221,7 +221,7 @@ async fn run_swarm(
     // Record swarm usage event (duration = sum of all worker durations)
     let workers = state.db.get_swarm_workers(&swarm_id);
     let total_ms: i64 = workers.iter().filter_map(|w| w.duration_ms).sum();
-    state.db.record_usage_event(&api_key, "swarm", None, Some(&swarm_id), total_ms);
+    state.db.record_usage_event(&api_key, "swarm", None, Some(&swarm_id), total_ms, 0, 0);
     tracing::info!(swarm_id, "Swarm complete");
 
     // Fire webhook
