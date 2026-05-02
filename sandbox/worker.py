@@ -165,6 +165,41 @@ def emit(obj):
     _PROTOCOL_STDOUT.flush()
 
 
+# ── Token estimation ─────────────────────────────────────────────────────────
+
+# Private names set once at worker start — everything that exists before user
+# code runs. Excluded from session-state token estimates.
+_BUILTIN_NAMES: set = set()
+
+def _init_builtin_names(session_globals: dict) -> None:
+    global _BUILTIN_NAMES
+    _BUILTIN_NAMES = set(session_globals.keys())
+
+def _count_chars(text: str) -> int:
+    return len(text) if text else 0
+
+def _estimate_output_tokens(stdout: str, result: str | None, html: str | None) -> int:
+    """Rough token count for what the agent receives back from this execute call."""
+    chars = _count_chars(stdout) + _count_chars(result or "") + _count_chars(html or "")
+    return max(1, chars // 4)
+
+def _estimate_state_tokens(session_globals: dict) -> int:
+    """Rough token count of all user-defined variables currently live in the interpreter.
+
+    This is data the agent can reference by name without it ever being in the
+    context window — the key metric for 'tokens avoided' by using the sandbox.
+    """
+    total_chars = 0
+    for name, val in session_globals.items():
+        if name in _BUILTIN_NAMES or name.startswith("_"):
+            continue
+        try:
+            total_chars += len(repr(val))
+        except Exception:
+            total_chars += 8  # fallback for unrepresentable objects
+    return max(0, total_chars // 4)
+
+
 class _StreamingCapture:
     """
     Stdout/stderr replacement used during streaming execution.
@@ -221,6 +256,7 @@ def make_session_globals():
         g["pd"] = _preloaded_pd
     if _preloaded_plt is not None:
         g["plt"] = _preloaded_plt
+    _init_builtin_names(g)
     return g
 
 
@@ -422,14 +458,19 @@ def handle_execute(code, session_globals, streaming=False):
         signal.signal(signal.SIGALRM, old_handler)
 
     duration_ms = int((time.monotonic() - start) * 1000)
+    stdout_val = captured.getvalue()
+    output_tokens = _estimate_output_tokens(stdout_val, eval_result_repr, html)
+    state_tokens = _estimate_state_tokens(session_globals)
     emit({
         "type": "result",
-        "stdout": captured.getvalue(),
+        "stdout": stdout_val,
         "result": eval_result_repr,
         "error": error,
         "duration_ms": duration_ms,
         "plots": plot_store,
         "html": html,
+        "output_tokens": output_tokens,
+        "state_tokens": state_tokens,
     })
 
 

@@ -78,6 +78,12 @@ pub struct Session {
     expires_at_secs: AtomicI64,
     /// Total execute calls made on this session.
     calls_used: AtomicU64,
+    /// Running total of output_tokens across all execute calls this session.
+    pub cumulative_output_tokens: AtomicU64,
+    /// Running total of state_tokens (last reported value * call count proxy).
+    /// We accumulate each call's state_tokens as a snapshot — the sum divided
+    /// by calls_used gives the average state held while the session was live.
+    pub cumulative_state_tokens: AtomicU64,
     pub runtime: Arc<Mutex<PythonRuntime>>,
     pub workspace: PathBuf,
     /// API key that owns this session — used for grace checkpointing on expiry.
@@ -100,6 +106,39 @@ impl Session {
     pub fn calls_used(&self) -> u64 {
         self.calls_used.load(Ordering::Relaxed)
     }
+
+    /// Record token counts from one execute call.
+    pub fn record_tokens(&self, output_tokens: u64, state_tokens: u64) {
+        self.cumulative_output_tokens.fetch_add(output_tokens, Ordering::Relaxed);
+        // Store the latest state snapshot (most recent is most accurate).
+        self.cumulative_state_tokens.store(state_tokens, Ordering::Relaxed);
+    }
+
+    pub fn token_report(&self) -> TokenReport {
+        let total_output = self.cumulative_output_tokens.load(Ordering::Relaxed);
+        let peak_state = self.cumulative_state_tokens.load(Ordering::Relaxed);
+        let calls = self.calls_used.load(Ordering::Relaxed).max(1);
+        // Without sandbox: every call would need all output tokens + the full
+        // state repeated each time. We use peak_state × calls as the proxy.
+        let estimated_without_sandbox = total_output + peak_state * calls;
+        TokenReport {
+            total_output_tokens: total_output,
+            peak_session_state_tokens: peak_state,
+            estimated_tokens_without_sandbox: estimated_without_sandbox,
+            net_token_savings: estimated_without_sandbox.saturating_sub(total_output),
+            estimated_cost_savings_usd: (estimated_without_sandbox.saturating_sub(total_output) as f64) / 1_000_000.0 * 3.0,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct TokenReport {
+    pub total_output_tokens: u64,
+    pub peak_session_state_tokens: u64,
+    pub estimated_tokens_without_sandbox: u64,
+    pub net_token_savings: u64,
+    /// Estimated USD savings at $3/1M tokens (claude-sonnet-4-6 input price)
+    pub estimated_cost_savings_usd: f64,
 }
 
 #[derive(Clone)]
@@ -291,6 +330,8 @@ impl SessionManager {
             info: info.clone(),
             expires_at_secs: AtomicI64::new(expires_at.timestamp()),
             calls_used: AtomicU64::new(0),
+            cumulative_output_tokens: AtomicU64::new(0),
+            cumulative_state_tokens: AtomicU64::new(0),
             runtime: Arc::new(Mutex::new(runtime)),
             workspace,
             api_key,

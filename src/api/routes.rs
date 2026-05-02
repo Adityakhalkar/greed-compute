@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/session/{id}/status", get(session_status))
         .route("/session/{id}/execute", post(execute_code))
         .route("/session/{id}/execute/stream", post(execute_code_stream))
+        .route("/session/{id}/token-report", get(session_token_report))
         .route("/session/{id}/install", post(install_packages))
         .route("/session/{id}/execute/async", post(execute_code_async))
         .route("/session/{id}/jobs", get(list_session_jobs))
@@ -197,6 +198,14 @@ struct ExecuteRequest {
 }
 
 #[derive(Serialize)]
+struct ExecuteTokenInfo {
+    output_tokens: u64,
+    session_state_tokens: u64,
+    estimated_context_tokens_without_sandbox: u64,
+    cumulative_session_savings: u64,
+}
+
+#[derive(Serialize)]
 struct ExecuteResponse {
     stdout: String,
     result: Option<String>,
@@ -206,6 +215,7 @@ struct ExecuteResponse {
     plots: Vec<String>,
     /// HTML table when the last expression was a DataFrame or Series
     html: Option<String>,
+    tokens: ExecuteTokenInfo,
 }
 
 async fn execute_code(
@@ -223,6 +233,10 @@ async fn execute_code(
     // immediately instead of queuing. Matches Jupyter's "kernel busy" behavior.
     let mut runtime = session.runtime.try_lock().map_err(|_| StatusCode::from_u16(423).unwrap())?;
     let result = runtime.execute(&body.code).await;
+    drop(runtime);
+
+    // Accumulate token data in session before touch() increments calls_used.
+    session.record_tokens(result.output_tokens, result.state_tokens);
 
     // Renew TTL on every execute — keeps active notebook sessions alive
     session.touch();
@@ -232,6 +246,14 @@ async fn execute_code(
         state.db.record_usage_event(key, "execute", Some(&id), None, result.duration_ms as i64);
     }
 
+    let report = session.token_report();
+    let tokens = ExecuteTokenInfo {
+        output_tokens: result.output_tokens,
+        session_state_tokens: result.state_tokens,
+        estimated_context_tokens_without_sandbox: result.output_tokens + result.state_tokens,
+        cumulative_session_savings: report.net_token_savings,
+    };
+
     Ok(Json(ExecuteResponse {
         stdout: result.stdout,
         result: result.result,
@@ -239,7 +261,16 @@ async fn execute_code(
         duration_ms: result.duration_ms,
         plots: result.plots,
         html: result.html,
+        tokens,
     }))
+}
+
+async fn session_token_report(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::sandbox::TokenReport>, StatusCode> {
+    let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(session.token_report()))
 }
 
 async fn execute_code_stream(

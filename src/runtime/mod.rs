@@ -4,7 +4,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Default)]
 pub struct ExecutionResult {
     pub stdout: String,
     pub result: Option<String>,
@@ -14,6 +14,14 @@ pub struct ExecutionResult {
     pub plots: Vec<String>,
     /// HTML string when the last expression was a DataFrame or Series
     pub html: Option<String>,
+    /// Estimated tokens in the output returned to the agent this call (chars/4)
+    pub output_tokens: u64,
+    /// Estimated tokens of all live user variables in the interpreter (chars/4)
+    pub state_tokens: u64,
+}
+
+fn extract_token_field(msg: &serde_json::Value, key: &str) -> u64 {
+    msg.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
 #[derive(serde::Serialize)]
@@ -168,22 +176,14 @@ impl PythonRuntime {
         // Send command to worker
         if let Err(e) = self.stdin.write_all(cmd_json.as_bytes()).await {
             return ExecutionResult {
-                stdout: String::new(),
-                result: None,
                 error: Some(format!("Failed to write to worker stdin: {}", e)),
-                duration_ms: 0,
-                plots: vec![],
-                html: None,
+                ..Default::default()
             };
         }
         if let Err(e) = self.stdin.flush().await {
             return ExecutionResult {
-                stdout: String::new(),
-                result: None,
                 error: Some(format!("Failed to flush worker stdin: {}", e)),
-                duration_ms: 0,
-                plots: vec![],
-                html: None,
+                ..Default::default()
             };
         }
 
@@ -193,78 +193,41 @@ impl PythonRuntime {
 
         match read_result {
             Ok(Ok(0)) => ExecutionResult {
-                stdout: String::new(),
-                result: None,
                 error: Some("Worker process died during execution".to_string()),
-                duration_ms: 0,
-                plots: vec![],
-                html: None,
+                ..Default::default()
             },
             Ok(Ok(_)) => {
                 match serde_json::from_str::<serde_json::Value>(line.trim()) {
                     Ok(msg) => ExecutionResult {
-                        stdout: msg
-                            .get("stdout")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        result: msg
-                            .get("result")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
-                        error: msg
-                            .get("error")
-                            .and_then(|v| {
-                                if v.is_null() {
-                                    None
-                                } else {
-                                    v.as_str().map(|s| s.to_string())
-                                }
-                            }),
-                        duration_ms: msg
-                            .get("duration_ms")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        plots: msg
-                            .get("plots")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
+                        stdout: msg.get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        result: msg.get("result").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        error: msg.get("error").and_then(|v| {
+                            if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }
+                        }),
+                        duration_ms: msg.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                        plots: msg.get("plots").and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                             .unwrap_or_default(),
-                        html: msg
-                            .get("html")
-                            .and_then(|v| {
-                                if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }
-                            }),
+                        html: msg.get("html").and_then(|v| {
+                            if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }
+                        }),
+                        output_tokens: extract_token_field(&msg, "output_tokens"),
+                        state_tokens: extract_token_field(&msg, "state_tokens"),
                     },
                     Err(e) => ExecutionResult {
-                        stdout: String::new(),
-                        result: None,
                         error: Some(format!("Invalid JSON from worker: {}", e)),
-                        duration_ms: 0,
-                        plots: vec![],
-                        html: None,
+                        ..Default::default()
                     },
                 }
             }
             Ok(Err(e)) => ExecutionResult {
-                stdout: String::new(),
-                result: None,
                 error: Some(format!("IO error reading from worker: {}", e)),
-                duration_ms: 0,
-                plots: vec![],
-                html: None,
+                ..Default::default()
             },
             Err(_) => ExecutionResult {
-                stdout: String::new(),
-                result: None,
                 error: Some("Execution timed out (35s)".to_string()),
                 duration_ms: 35_000,
-                plots: vec![],
-                html: None,
+                ..Default::default()
             },
         }
     }
@@ -291,12 +254,8 @@ impl PythonRuntime {
             || self.stdin.flush().await.is_err()
         {
             return ExecutionResult {
-                stdout: String::new(),
-                result: None,
                 error: Some("Failed to send execute command".into()),
-                duration_ms: 0,
-                plots: vec![],
-                html: None,
+                ..Default::default()
             };
         }
 
@@ -308,12 +267,8 @@ impl PythonRuntime {
             match timeout(deadline, self.reader.read_line(&mut line)).await {
                 Ok(Ok(0)) => {
                     return ExecutionResult {
-                        stdout: String::new(),
-                        result: None,
                         error: Some("Worker process died during execution".into()),
-                        duration_ms: 0,
-                        plots: vec![],
-                        html: None,
+                        ..Default::default()
                     };
                 }
                 Ok(Ok(_)) => {
@@ -321,8 +276,6 @@ impl PythonRuntime {
                     if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
                         match msg.get("type").and_then(|v| v.as_str()) {
                             Some("stream") => {
-                                // Forward stream chunk to SSE channel; ignore send errors
-                                // (client may have disconnected).
                                 let _ = tx.send(trimmed.to_string()).await;
                             }
                             Some("result") => {
@@ -335,6 +288,8 @@ impl PythonRuntime {
                                         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                                         .unwrap_or_default(),
                                     html: msg.get("html").and_then(|v| if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) }),
+                                    output_tokens: extract_token_field(&msg, "output_tokens"),
+                                    state_tokens: extract_token_field(&msg, "state_tokens"),
                                 };
                             }
                             _ => {}
@@ -343,12 +298,9 @@ impl PythonRuntime {
                 }
                 _ => {
                     return ExecutionResult {
-                        stdout: String::new(),
-                        result: None,
                         error: Some("Execution timed out (35s)".into()),
                         duration_ms: 35_000,
-                        plots: vec![],
-                        html: None,
+                        ..Default::default()
                     };
                 }
             }
