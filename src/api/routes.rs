@@ -23,9 +23,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/session/create", post(create_session))
         .route("/session/{id}", delete(terminate_session))
         .route("/session/{id}/status", get(session_status))
+        .route("/templates", get(list_templates))
         .route("/session/{id}/execute", post(execute_code))
         .route("/session/{id}/execute/stream", post(execute_code_stream))
         .route("/session/{id}/token-report", get(session_token_report))
+        .route("/session/{id}/trace", get(session_trace))
         .route("/session/{id}/install", post(install_packages))
         .route("/session/{id}/execute/async", post(execute_code_async))
         .route("/session/{id}/jobs", get(list_session_jobs))
@@ -75,8 +77,34 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "active_sessions": state.sessions.active_session_count(),
         "warm_pool": pool_size,
         "template_pools": template_pools,
-        "templates": ["data-science", "machine-learning", "web-scraping", "blank"],
+        "templates": {
+            "data-science":     "numpy, pandas, matplotlib, scikit-learn, scipy",
+            "machine-learning": "torch, transformers, datasets, accelerate",
+            "web-scraping":     "requests, httpx, beautifulsoup4, lxml",
+            "llm-tools":        "openai, anthropic, langchain, tiktoken",
+            "data-viz":         "plotly, bokeh, altair, seaborn, kaleido",
+            "scientific":       "sympy, statsmodels, networkx, imageio",
+            "blank":            "no pre-installed packages",
+        },
     }))
+}
+
+async fn list_templates() -> Json<serde_json::Value> {
+    use crate::sandbox::SessionTemplate;
+    let all = [
+        SessionTemplate::DataScience,
+        SessionTemplate::MachineLearning,
+        SessionTemplate::WebScraping,
+        SessionTemplate::LlmTools,
+        SessionTemplate::DataViz,
+        SessionTemplate::Scientific,
+        SessionTemplate::Blank,
+    ];
+    let templates: Vec<_> = all.iter().map(|t| serde_json::json!({
+        "name": t.name(),
+        "packages": t.description(),
+    })).collect();
+    Json(serde_json::json!({ "templates": templates }))
 }
 
 // ── Session Management ──────────────────────────────────
@@ -255,8 +283,10 @@ async fn execute_code(
         None
     };
 
-    // Renew TTL on every execute — keeps active notebook sessions alive
+    // Renew TTL on every execute — keeps active notebook sessions alive; also
+    // increments calls_used which we read as the call_index for spans.
     session.touch();
+    let call_index = session.calls_used();
 
     // Record usage event — token columns are 0 when tracking is disabled
     let (out_tok, state_tok) = if session.token_tracking {
@@ -266,6 +296,16 @@ async fn execute_code(
     };
     if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         state.db.record_usage_event(key, "execute", Some(&id), None, result.duration_ms as i64, out_tok, state_tok);
+        state.db.record_span(
+            &id, key, call_index,
+            &body.code,
+            &result.stdout,
+            result.result.as_deref(),
+            result.error.as_deref(),
+            result.duration_ms,
+            out_tok,
+            state_tok,
+        );
     }
 
     Ok(Json(ExecuteResponse {
@@ -285,6 +325,26 @@ async fn session_token_report(
 ) -> Result<Json<crate::sandbox::TokenReport>, StatusCode> {
     let session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(session.token_report()))
+}
+
+async fn session_trace(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Session must still be alive (not yet expired/terminated)
+    let _session = state.sessions.get_session(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let api_key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let spans = state.db.get_session_trace(&id, api_key);
+    Ok(Json(serde_json::json!({
+        "session_id": id,
+        "total_calls": spans.len(),
+        "spans": spans,
+    })))
 }
 
 async fn execute_code_stream(

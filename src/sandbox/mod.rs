@@ -17,10 +17,13 @@ const WARM_POOL_SIZE: usize = 3;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionTemplate {
-    DataScience,   // numpy pandas matplotlib scikit-learn scipy
+    DataScience,     // numpy pandas matplotlib scikit-learn scipy
     MachineLearning, // torch transformers datasets accelerate
-    WebScraping,   // requests httpx beautifulsoup4 lxml
-    Blank,         // nothing pre-installed (default)
+    WebScraping,     // requests httpx beautifulsoup4 lxml
+    LlmTools,        // openai anthropic langchain tiktoken
+    DataViz,         // plotly bokeh altair seaborn
+    Scientific,      // sympy statsmodels networkx imageio
+    Blank,           // nothing pre-installed (default)
 }
 
 impl SessionTemplate {
@@ -29,6 +32,9 @@ impl SessionTemplate {
             "data-science" | "data_science" | "datascience" => Some(Self::DataScience),
             "ml" | "machine-learning" | "machine_learning" => Some(Self::MachineLearning),
             "web" | "web-scraping" | "scraping" => Some(Self::WebScraping),
+            "llm" | "llm-tools" | "llm_tools" => Some(Self::LlmTools),
+            "viz" | "data-viz" | "data_viz" | "dataviz" => Some(Self::DataViz),
+            "sci" | "scientific" => Some(Self::Scientific),
             "blank" | "" => Some(Self::Blank),
             _ => None,
         }
@@ -36,10 +42,13 @@ impl SessionTemplate {
 
     pub fn packages(&self) -> &[&str] {
         match self {
-            Self::DataScience => &["numpy", "pandas", "matplotlib", "scikit-learn", "scipy"],
+            Self::DataScience     => &["numpy", "pandas", "matplotlib", "scikit-learn", "scipy"],
             Self::MachineLearning => &["torch", "transformers", "datasets", "accelerate"],
-            Self::WebScraping => &["requests", "httpx", "beautifulsoup4", "lxml"],
-            Self::Blank => &[],
+            Self::WebScraping     => &["requests", "httpx", "beautifulsoup4", "lxml"],
+            Self::LlmTools        => &["openai", "anthropic", "langchain", "tiktoken"],
+            Self::DataViz         => &["plotly", "bokeh", "altair", "seaborn", "kaleido"],
+            Self::Scientific      => &["sympy", "statsmodels", "networkx", "imageio"],
+            Self::Blank           => &[],
         }
     }
 
@@ -54,10 +63,25 @@ impl SessionTemplate {
 
     pub fn name(&self) -> &str {
         match self {
-            Self::DataScience => "data-science",
+            Self::DataScience     => "data-science",
             Self::MachineLearning => "machine-learning",
-            Self::WebScraping => "web-scraping",
-            Self::Blank => "blank",
+            Self::WebScraping     => "web-scraping",
+            Self::LlmTools        => "llm-tools",
+            Self::DataViz         => "data-viz",
+            Self::Scientific      => "scientific",
+            Self::Blank           => "blank",
+        }
+    }
+
+    pub fn description(&self) -> &str {
+        match self {
+            Self::DataScience     => "numpy, pandas, matplotlib, scikit-learn, scipy",
+            Self::MachineLearning => "torch, transformers, datasets, accelerate",
+            Self::WebScraping     => "requests, httpx, beautifulsoup4, lxml",
+            Self::LlmTools        => "openai, anthropic, langchain, tiktoken",
+            Self::DataViz         => "plotly, bokeh, altair, seaborn, kaleido",
+            Self::Scientific      => "sympy, statsmodels, networkx, imageio",
+            Self::Blank           => "no pre-installed packages",
         }
     }
 }
@@ -159,7 +183,7 @@ impl SessionManager {
         let template_pools: Arc<DashMap<String, Arc<Mutex<Vec<PythonRuntime>>>>> =
             Arc::new(DashMap::new());
         // Pre-create pool slots for each template
-        for t in &[SessionTemplate::DataScience, SessionTemplate::MachineLearning, SessionTemplate::WebScraping] {
+        for t in &[SessionTemplate::DataScience, SessionTemplate::MachineLearning, SessionTemplate::WebScraping, SessionTemplate::LlmTools, SessionTemplate::DataViz, SessionTemplate::Scientific] {
             template_pools.insert(t.name().to_string(), Arc::new(Mutex::new(Vec::new())));
         }
         Self {

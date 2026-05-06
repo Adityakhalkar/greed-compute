@@ -172,7 +172,85 @@ impl Database {
         let _ = conn.execute_batch("ALTER TABLE daily_usage ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;");
         let _ = conn.execute_batch("ALTER TABLE daily_usage ADD COLUMN total_state_tokens INTEGER NOT NULL DEFAULT 0;");
 
+        // Execution spans — one row per execute call, ordered within a session.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS execution_spans (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                api_key     TEXT NOT NULL,
+                call_index  INTEGER NOT NULL,
+                code        TEXT NOT NULL,
+                stdout      TEXT,
+                result      TEXT,
+                error       TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                state_tokens  INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_spans_session ON execution_spans(session_id, call_index);
+            CREATE INDEX IF NOT EXISTS idx_spans_key ON execution_spans(api_key);
+            "
+        )?;
+
         Ok(())
+    }
+
+    // ── Execution spans ──────────────────────────────────────────────────────
+
+    pub fn record_span(
+        &self,
+        session_id: &str,
+        api_key: &str,
+        call_index: u64,
+        code: &str,
+        stdout: &str,
+        result: Option<&str>,
+        error: Option<&str>,
+        duration_ms: u64,
+        output_tokens: u64,
+        state_tokens: u64,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO execution_spans
+             (session_id, api_key, call_index, code, stdout, result, error, duration_ms, output_tokens, state_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                session_id, api_key, call_index as i64,
+                code, stdout, result, error,
+                duration_ms as i64, output_tokens as i64, state_tokens as i64
+            ],
+        );
+    }
+
+    pub fn get_session_trace(&self, session_id: &str, api_key: &str) -> Vec<SpanRecord> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT call_index, code, stdout, result, error, duration_ms,
+                    output_tokens, state_tokens, created_at
+             FROM execution_spans
+             WHERE session_id = ?1 AND api_key = ?2
+             ORDER BY call_index ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(params![session_id, api_key], |row| {
+            Ok(SpanRecord {
+                call_index:    row.get(0)?,
+                code:          row.get(1)?,
+                stdout:        row.get(2)?,
+                result:        row.get(3)?,
+                error:         row.get(4)?,
+                duration_ms:   row.get(5)?,
+                output_tokens: row.get(6)?,
+                state_tokens:  row.get(7)?,
+                created_at:    row.get(8)?,
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
     pub fn validate_api_key(&self, key: &str) -> Option<ApiKeyInfo> {
@@ -923,6 +1001,19 @@ pub struct WorkspaceMember {
     pub api_key: String,
     pub role: String,
     pub added_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpanRecord {
+    pub call_index:    i64,
+    pub code:          String,
+    pub stdout:        Option<String>,
+    pub result:        Option<String>,
+    pub error:         Option<String>,
+    pub duration_ms:   i64,
+    pub output_tokens: i64,
+    pub state_tokens:  i64,
+    pub created_at:    String,
 }
 
 fn workspace_from_row(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceRecord> {
